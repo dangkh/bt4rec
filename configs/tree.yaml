@@ -1,0 +1,17 @@
+# Default hyper-parameters for bt4rec.cli.build_tree (override with env vars in scripts/03_build_tree.sh)
+num_clusters: 50
+cluster_mode: constrained
+constraint_level: mechanism
+cluster_text_field: structured_combined
+embedding_model: Qwen/Qwen3-Embedding-0.6B
+min_cluster_similarity: 0.55
+min_cluster_margin: 0.02
+max_order: 5
+count_mode: user_normalized
+smoothing_kappa: 5.0
+min_support_users: 3
+min_support_occurrences: 3
+min_jsd: 0.05
+label_assignment: cosine     # kmeans = legacy behaviour
+state_signature: medoid      # mode = legacy behaviour
+collapse_consecutive_states: false   # true disables the P(stay) block in *_stay modes

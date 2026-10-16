@@ -1,0 +1,11 @@
+# Amazon CDs & Vinyl
+dataset: CDs
+aliases: [cds, cd]
+history_size: 20          # train items shown to the ranker and used for behavior windows
+window_size: 3
+tree_dir: trees/CDs_1000_20
+protocol_dir: data/CDs/protocol
+eval_users: data/CDs/protocol/eval_users_1000.json
+train_users: data/CDs/protocol/train_users_1000.json
+candidate_file: data/CDs/protocol/user_candidates_testpool1000_seed42.json
+precomputed_dir: precomputed/CDs          # gemma backend; qwen writes to precomputed/CDs/qwen

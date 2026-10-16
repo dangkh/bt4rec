@@ -1,0 +1,11 @@
+# Amazon Video Games
+dataset: Video_Games
+aliases: [video_games, videogames, video, vg, vgs]
+history_size: 20
+window_size: 3
+tree_dir: trees/VGs_1000_20
+protocol_dir: data/Video_Games/protocol
+eval_users: data/Video_Games/protocol/eval_users_1000.json
+train_users: data/Video_Games/protocol/train_users_1000.json
+candidate_file: data/Video_Games/protocol/user_candidates_testpool1000_seed42.json
+precomputed_dir: precomputed/Video_Games

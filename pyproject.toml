@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bt4rec"
+version = "0.2.0"
+description = "CoMemTree / BT4Rec: collaborative reverse behavior tree for LLM sequential recommendation"
+requires-python = ">=3.10"
+dependencies = ["numpy", "scikit-learn", "tqdm", "pyyaml"]
+
+[project.optional-dependencies]
+gpu = ["torch", "transformers", "sentence-transformers", "unsloth"]
+dev = ["pytest", "ruff"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint.isort]
+known-first-party = ["bt4rec"]
