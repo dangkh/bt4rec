@@ -1,10 +1,10 @@
 # MovieLens-1M
 dataset: ML
 aliases: [ml, ml1m, movielens]
-# The ML behavior cache was built with 30 history items and 5-item windows
-# (6 windows per user), unlike CDs / Video_Games (20 items, 3-item windows).
+# ML uses 3-item windows like CDs / Video_Games. Check the history size the
+# ML behavior cache was built with (max_train_interactions in test_shared.jsonl).
 history_size: 30
-window_size: 5
+window_size: 3
 tree_dir: trees/ML_1000_20
 protocol_dir: data/ML/protocol
 eval_users: data/ML/protocol/eval_users_1000.json

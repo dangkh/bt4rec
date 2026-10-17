@@ -5,13 +5,14 @@ CoMemTree frozen protocol, trained the standard way.
 Protocol
 --------
 Training data
-  * ALL users in user_sequences.json, not only the evaluation users.
-  * Only each user's ``train`` list. ``test`` (and any legacy ``val`` /
-    ``validation`` field) is never used for training or as model input.
-  * No history truncation for training. SASRec reads the last ``--max-len``
-    items (default 50 for Amazon, 200 for MovieLens). The 10-20 item cut is
-    only for LLM prompts.
-  * Vocabulary = items that occur in at least one user's train list.
+  * Users: data/<dataset>/protocol/train_users_1000.json by default (the same
+    1000-user cohort as CoMemTree; eval users are always included). Pass
+    ``--train-all-users`` to train on every user in user_sequences.json.
+  * Each training user's FULL ``train`` list (never truncated). ``test`` (and
+    any legacy ``val`` / ``validation`` field) is never used for training or as
+    model input. SASRec reads the last ``--max-len`` items (default 50 for
+    Amazon, 200 for MovieLens). The 10-20 item cut is only for LLM prompts.
+  * Vocabulary = items that occur in at least one training user's train list.
 
 Model selection
   * Penultimate-style validation: train on train[:-1] and hold out train[-1]
@@ -21,6 +22,11 @@ Model selection
   * ``--refit`` (default on): retrain from scratch on the full train lists for
     the selected number of epochs, then evaluate. ``--no-refit`` evaluates the
     best validation checkpoint instead.
+
+Random reference
+  * Every run also saves the random-ranking level of the same frozen
+    candidates: the exact expectation and the mean/std over ``--random-repeats``
+    seeded shuffles (random_metrics.json, random_rankings.jsonl).
 
 Evaluation
   * Exactly the frozen evaluation users (``--user-ids-file``) and their frozen
@@ -32,11 +38,13 @@ Evaluation
 
 Usage
 -----
+  python comemtree_baselines.py random   --dataset CDs
   python comemtree_baselines.py pop      --dataset CDs
   python comemtree_baselines.py lightgcn --dataset CDs
   python comemtree_baselines.py sasrec   --dataset CDs
   python comemtree_baselines.py sasrec   --dataset ML            # max_len 200
-  python comemtree_baselines.py all      --dataset Video_Games   # pop + lightgcn + sasrec
+  python comemtree_baselines.py all      --dataset Video_Games   # random + pop + lightgcn + sasrec
+  python comemtree_baselines.py lightgcn --dataset CDs --train-all-users   # every user, not only 1000
 
 Paths default to data/<dataset>/{items.json,user_sequences.json} and
 data/<dataset>/protocol/{eval_users_1000.json,user_candidates_testpool1000_seed42.json};
@@ -123,17 +131,28 @@ def set_seed(seed: int) -> None:
 
 
 class Data:
-    """All-user training data + frozen evaluation set."""
+    """Training data (selected users, full train histories) + frozen evaluation set."""
 
     def __init__(self, args: argparse.Namespace) -> None:
         raw = load_json(args.sequences)
+        eval_ids = load_user_ids(args.user_ids_file)
+        if args.max_eval_users > 0:
+            eval_ids = eval_ids[: args.max_eval_users]
+        if args.train_users_file:
+            allowed = set(load_user_ids(args.train_users_file)) | set(eval_ids)
+            self.train_user_source = args.train_users_file + " (+ eval users)"
+        else:
+            allowed = None
+            self.train_user_source = "all users in " + args.sequences
         self.train: Dict[str, List[str]] = {}
         ignored_val = 0
         for uid, rec in raw.items():
             uid = str(uid)
+            if allowed is not None and uid not in allowed:
+                continue
             if not isinstance(rec, dict):
                 raise ValueError(f"user {uid}: expected a dict with train/test")
-            tr = as_str_list(rec.get("train"))
+            tr = as_str_list(rec.get("train"))  # FULL train history, never truncated
             ignored_val += sum(len(as_str_list(rec.get(k))) for k in ("val", "valid", "validation"))
             if tr:
                 self.train[uid] = tr
@@ -150,9 +169,7 @@ class Data:
         self.n_interactions = int(sum(len(s) for s in self.train.values()))
 
         # Frozen evaluation set.
-        self.eval_users = load_user_ids(args.user_ids_file)
-        if args.max_eval_users > 0:
-            self.eval_users = self.eval_users[: args.max_eval_users]
+        self.eval_users = eval_ids
         cand = load_json(args.candidate_file)
         if isinstance(cand, dict) and isinstance(cand.get("users"), dict):
             cand = cand["users"]
@@ -201,6 +218,7 @@ class Data:
         cold_t = sum(self.targets[u] not in self.item_index for u in self.eval_users)
         warm_users = sum(all(i in self.item_index for i in self.candidates[u]) for u in self.eval_users)
         return {
+            "train_user_source": self.train_user_source,
             "n_train_users": self.n_users,
             "n_train_interactions": self.n_interactions,
             "n_vocab_items": self.n_items,
@@ -210,6 +228,7 @@ class Data:
             "ignored_validation_items_in_source": self.ignored_validation_items,
             "n_eval_users": len(self.eval_users),
             "eval_users_are_part_of_training": True,
+            "train_history_truncated": False,
             "test_items_used_for_training": False,
             "cold_candidate_rate": cold_c / len(cand_all),
             "cold_target_rate": cold_t / len(self.eval_users),
@@ -274,6 +293,52 @@ def evaluate_candidates(data: Data, score_fn, method: str) -> Tuple[Dict[str, An
             "cold_candidates": cold, "target_is_cold": data.targets[u] not in data.item_index,
         })
     return {"metrics": compute_metrics(ranks), "metrics_all_candidates_warm": compute_metrics(warm_ranks)}, rows
+
+
+# =============================================================================
+# Random ranking (reference level)
+# =============================================================================
+
+def random_expected_metrics(n_candidates: int) -> Dict[str, float]:
+    """Exact expectation when the target's rank is uniform on 1..n_candidates."""
+    n = n_candidates
+    out: Dict[str, float] = {}
+    for k in KS:
+        kk = min(k, n)
+        out[f"Hit@{k}"] = kk / n
+        out[f"NDCG@{k}"] = sum(1.0 / math.log2(r + 1.0) for r in range(1, kk + 1)) / n
+    out["MRR"] = sum(1.0 / r for r in range(1, n + 1)) / n
+    out["MeanRank"] = (n + 1) / 2.0
+    out["MedianRank"] = (n + 1) / 2.0
+    return out
+
+
+def run_random(args: argparse.Namespace, data: Data) -> Dict[str, Any]:
+    """Uniform random rankings of the frozen candidates, repeated with seeds."""
+    reps = []
+    rows = []
+    for r in range(args.random_repeats):
+        rng = random.Random(f"{args.seed}:random:{r}")
+        ranks = []
+        for u in data.eval_users:
+            cands = list(data.candidates[u])
+            rng.shuffle(cands)
+            rank = cands.index(data.targets[u]) + 1
+            ranks.append(rank)
+            if r == 0:
+                rows.append({"user_id": u, "method": "random", "target": data.targets[u],
+                             "candidates": data.candidates[u], "ranked_candidates": cands,
+                             "rank_position": rank})
+        reps.append(compute_metrics(ranks))
+    keys = [k for k in reps[0] if k != "NumUsers"]
+    mean = {k: float(np.mean([m[k] for m in reps])) for k in keys}
+    std = {k: float(np.std([m[k] for m in reps])) for k in keys}
+    mean["NumUsers"] = len(data.eval_users)
+    return {"method": "Random",
+            "hyperparameters": {"repeats": args.random_repeats, "seed": args.seed},
+            "metrics": mean, "metrics_std_over_repeats": std,
+            "metrics_expected_exact": random_expected_metrics(args.expected_candidates),
+            "metrics_all_candidates_warm": {}, "_rows": rows}
 
 
 # =============================================================================
@@ -631,7 +696,7 @@ def run_sasrec(args: argparse.Namespace, data: Data) -> Dict[str, Any]:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("method", choices=["pop", "lightgcn", "sasrec", "all"])
+    p.add_argument("method", choices=["random", "pop", "lightgcn", "sasrec", "all"])
     p.add_argument("--dataset", required=True, help="CDs | Video_Games | ML (sets default paths and max_len)")
     p.add_argument("--data-root", default="data")
     p.add_argument("--items", default=None, help="unused by the models; kept for provenance")
@@ -640,6 +705,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--candidate-file", default=None)
     p.add_argument("--expected-candidates", type=int, default=20)
     p.add_argument("--max-eval-users", type=int, default=0, help="0 = all users in --user-ids-file")
+    p.add_argument("--train-users-file", default=None,
+                   help="users whose FULL train histories are used for training "
+                        "(default data/<dataset>/protocol/train_users_1000.json; eval users always included)")
+    p.add_argument("--train-all-users", action="store_true",
+                   help="train on every user in --sequences instead of --train-users-file")
+    p.add_argument("--random-repeats", type=int, default=100, help="seeded repetitions of the random ranking")
     p.add_argument("--output-dir", default=None, help="default results/baselines/<dataset>")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", default="auto")
@@ -672,7 +743,12 @@ def parse_args() -> argparse.Namespace:
     a.sequences = a.sequences or str(root / "user_sequences.json")
     a.user_ids_file = a.user_ids_file or str(root / "protocol" / "eval_users_1000.json")
     a.candidate_file = a.candidate_file or str(root / "protocol" / "user_candidates_testpool1000_seed42.json")
-    a.output_dir = a.output_dir or f"results/baselines/{a.dataset}"
+    if a.train_all_users:
+        a.train_users_file = None
+    else:
+        a.train_users_file = a.train_users_file or str(root / "protocol" / "train_users_1000.json")
+    tag = "all_users" if a.train_users_file is None else Path(a.train_users_file).stem
+    a.output_dir = a.output_dir or f"results/baselines/{a.dataset}/{tag}"
     a.max_len = a.max_len or DEFAULT_MAX_LEN.get(a.dataset, 50)
     a.dropout = a.dropout if a.dropout is not None else (0.2 if a.dataset == "ML" else 0.5)
     return a
@@ -697,14 +773,17 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     save_json(out_dir / "data_stats.json", stats)
     methods = ["pop", "lightgcn", "sasrec"] if a.method == "all" else [a.method]
+    # The random reference is always computed and saved with every run.
+    methods = ["random"] + [m for m in methods if m != "random"]
     table = {}
     for m in methods:
         args = method_args(a, m)
         t = time.time()
-        res = {"pop": run_pop, "lightgcn": run_lightgcn, "sasrec": run_sasrec}[m](args, data)
+        res = {"random": run_random, "pop": run_pop, "lightgcn": run_lightgcn, "sasrec": run_sasrec}[m](args, data)
         rows = res.pop("_rows")
         res.update({"dataset": a.dataset, "data_stats": stats, "runtime_sec": round(time.time() - t, 1),
-                    "protocol": "all-user train, no history cut, penultimate-item early stopping, "
+                    "train_users": data.train_user_source,
+                    "protocol": "full train histories (no truncation), penultimate-item early stopping, "
                                 "frozen eval users + 20 frozen candidates"})
         save_json(out_dir / f"{m}_metrics.json", res)
         write_jsonl(out_dir / f"{m}_rankings.jsonl", rows)
@@ -713,12 +792,17 @@ def main() -> None:
         print(f"[RESULT] {res['method']}: NDCG@1={mm['NDCG@1']:.4f} NDCG@5={mm['NDCG@5']:.4f} "
               f"NDCG@10={mm['NDCG@10']:.4f} Hit@5={mm['Hit@5']:.4f} Hit@10={mm['Hit@10']:.4f} "
               f"MRR={mm['MRR']:.4f}", flush=True)
-    print("\n[SUMMARY] random ranking with 20 candidates: NDCG@1=0.0500 Hit@5=0.2500 Hit@10=0.5000")
+    print(f"\n[SUMMARY] train users: {data.train_user_source} (n={data.n_users})")
     for name, res in table.items():
         mm, ww = res["metrics"], res["metrics_all_candidates_warm"]
         print(f"  {name:10s} N@1={mm['NDCG@1']:.4f} N@10={mm['NDCG@10']:.4f} H@5={mm['Hit@5']:.4f} "
               f"| all-warm subset (n={ww.get('NumUsers', 0)}): N@10={ww.get('NDCG@10', float('nan')):.4f}")
     print(f"  cold candidate rate={stats['cold_candidate_rate']:.4%} cold target rate={stats['cold_target_rate']:.4%}")
+    cols = ["NDCG@1", "NDCG@5", "NDCG@10", "Hit@1", "Hit@5", "Hit@10", "MRR"]
+    lines = ["method," + ",".join(cols)]
+    for name, res in table.items():
+        lines.append(name + "," + ",".join(f"{res['metrics'][c]:.4f}" for c in cols))
+    (out_dir / "summary.csv").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"Saved to {out_dir} ({time.time() - t0:.0f}s)")
 
 
