@@ -16,8 +16,13 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
+# baseline/ must win over src/ and site-packages so that the local
+# baseline/allmrec/ package is imported (not another module with the same name).
 sys.path.insert(0, str(HERE.parent / "src"))
+sys.path.insert(0, str(HERE))
+_pkg_dir = HERE / "allmrec"
+if not (_pkg_dir / "__init__.py").exists():
+    raise SystemExit(f"Missing {_pkg_dir}/__init__.py: copy the whole baseline/allmrec/ folder")
 
 MAX_INTERACTIONS = 20
 

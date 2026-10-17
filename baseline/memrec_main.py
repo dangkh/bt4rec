@@ -27,8 +27,13 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-sys.path.insert(0, str(HERE))
+# baseline/ must win over src/ and site-packages so that the local
+# baseline/memrec/ package is imported (not another module with the same name).
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(HERE))
+_pkg_dir = HERE / "memrec"
+if not (_pkg_dir / "__init__.py").exists():
+    raise SystemExit(f"Missing {_pkg_dir}/__init__.py: copy the whole baseline/memrec/ folder")
 
 from bt4rec.config import load_dataset_config  # noqa: E402
 
