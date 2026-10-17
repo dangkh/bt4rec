@@ -135,6 +135,59 @@ from bt4rec.tree.query import ReverseBehaviorTree, latest_accepted_state_suffix
 from bt4rec.tree.vocab import ClusterStateVocabulary
 
 
+def comemtree_cost(a, rows, modes, users, test_cache):
+    """Per-mode cost in the shared bt4rec_cost_v1 layout (see bt4rec.eval.cost).
+
+    Online = 1 ranking call per user per mode. Behaviour extraction (one LLM call
+    per 3-item window) and Tree construction are precomputed once and reported as
+    upstream / memory so they can be compared with the baselines' build cost.
+    """
+    from bt4rec.eval.cost import CostTracker, memory_block
+    by_mode = {}
+    for mode in modes:
+        t = CostTracker(f'comemtree:{mode}')
+        for r in rows:
+            m = r.get('rankings', {}).get(mode, {})
+            t.llm('ranking', r['user_id'], int(m.get('input_tokens', 0) or 0),
+                  int(m.get('output_tokens', 0) or 0))
+        by_mode[mode] = t.summary(users)['online']
+        by_mode[mode]['token_counts_available'] = all('input_tokens' in r.get('rankings', {}).get(mode, {})
+                                                      for r in rows)
+    windows = {u: len(test_cache[u].get('generated_behaviors') or []) for u in users}
+    states = nodes = None
+    try:
+        states = len(load_json(a.states_json).get('states', []))
+        tj = load_json(a.tree_json)
+        nodes = len(tj.get('nodes', {})) if isinstance(tj, dict) else None
+    except Exception:
+        pass
+    train_windows = None
+    try:
+        tb = a.train_behaviors or str(Path(a.precomputed_behaviors).parent / 'train_shared.jsonl')
+        with open(tb, encoding='utf8') as f:
+            train_windows = sum(1 for line in f if line.strip())
+    except Exception:
+        pass
+    memory = memory_block(
+        total=sum(windows.values()), per_user=windows,
+        kinds={'behavior_memories_eval_users': sum(windows.values()),
+               'train_behavior_memories': train_windows,
+               'tree_behavior_states': states, 'tree_nodes': nodes},
+        scope='per_user behaviour memories + one global Tree',
+        note='Each 3-item TRAIN window yields one behaviour memory (1 extraction LLM call). '
+             'The Tree is built from train-user memories without extra LLM calls.')
+    return {'schema_version': 'bt4rec_cost_v1', 'method': 'comemtree', 'num_eval_users': len(users),
+            'by_mode': by_mode,
+            'upstream_reused': {'behavior_extraction_llm_calls_eval_users': sum(windows.values()),
+                                'behavior_extraction_calls_per_user': (sum(windows.values()) / max(1, len(users))),
+                                'train_behavior_extraction_llm_calls': train_windows,
+                                'note': 'precomputed once (bt4rec.cli.precompute); shared by CoMemTree '
+                                        'modes and aMem4Rec. Tokens are printed by precompute.'},
+            'online_embedding': {'texts_per_user': (sum(windows.values()) / max(1, len(users))),
+                                 'note': 'each behaviour is embedded once to map it to a Tree state'},
+            'memory': memory}
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="CoMemTree/Qwen LIST ranking, standardized frozen train-only protocol. "
@@ -499,6 +552,8 @@ def main():
                  'unavailable_reasons':dict(Counter(x.get('reason') for x in stay_rows
                      if isinstance(x,dict) and not x.get('available')))}
                 if set(modes) & STAY_MODES else None)
+    cost=comemtree_cost(a,rows,modes,users,test_cache)
+    dump_json(run_dir/'cost_summary.json',cost)
     summary={'schema_version':SCHEMA_VERSION,'rank_prompt_version':RANK_PROMPT_VERSION,
              'dataset':a.dataset,'modes':modes,'num_users':len(users),
              'metrics':metric_all,'metrics_complete_only':metric_complete,
@@ -507,7 +562,8 @@ def main():
              'differences':deltas,'parse_quality':parse_quality,
              'tree_context_order_counts':dict(Counter(str(r.get('tree_result',{}).get('matched_order')) for r in rows)),
              'tree_root_fallback_count':sum(r.get('tree_result',{}).get('matched_order')==0 for r in rows),
-             'ranking_llm':ranker.stats(), 'frozen_protocol':audit,'tree_provenance':prov,
+             'ranking_llm':ranker.stats(), 'cost_by_mode':cost['by_mode'],
+             'frozen_protocol':audit,'tree_provenance':prov,
              'last_state_persistence_audit':stay_audit,
              'pmnc':pmn_audit,'run_dir':str(run_dir),'config':vars(a),
              'warning':'ORACLE uses held-out test information; diagnostic only, not deployable. '

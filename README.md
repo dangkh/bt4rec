@@ -19,10 +19,11 @@ src/bt4rec/
   llm/         encoder (Qwen3-Embedding), ranker (Qwen2.5 list ranker)
   ranking/     prompts, modes, parse
   guidance/    sources (latest/random/global/oracle), pmn, persistence (P(stay))
-  eval/        metrics (+ paired bootstrap)
+  eval/        metrics (+ paired bootstrap), cost (cost_summary.json dùng chung mọi phương pháp)
   inference/   inputs, audit, constants
   baselines/   pmn_summaries, oracle
   cli/         prepare_protocol, precompute, build_tree, prepare_pmn, prepare_oracle, run, config
+baseline/           Native, i2Agent (prior/direct), aMem4Rec, Random/Pop/LightGCN/SASRec — xem baseline/README.md
 tests/              unit test + dữ liệu giả lập (không cần GPU)
 legacy/             bản gốc các script cũ (để tái lập số liệu cũ / đối chiếu)
 ```

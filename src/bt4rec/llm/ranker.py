@@ -229,14 +229,20 @@ class LocalQwenRanker:
             )
         )
 
-        for gen_row in generated:
+        # Exact per-sample counts: real prompt tokens (no left padding) and
+        # generated tokens up to and including EOS. Used for cost reporting.
+        prompt_tokens = [int(x) for x in batch["attention_mask"].sum(dim=1).tolist()]
+        eos_id = self.tokenizer.eos_token_id
+        self._last_token_counts = []
+        for gen_row, n_in in zip(generated, prompt_tokens):
+            toks = [int(t) for t in gen_row.tolist()]
+            n_out = toks.index(eos_id) + 1 if eos_id is not None and eos_id in toks else len(toks)
+            self._last_token_counts.append((n_in, n_out))
             self.calls.append(
                 CallStat(
                     call_type=call_type,
-                    input_tokens=input_width,
-                    output_tokens=int(
-                        gen_row.shape[0]
-                    ),
+                    input_tokens=n_in,
+                    output_tokens=n_out,
                     elapsed_sec=float(
                         per_sample_time
                     ),
@@ -432,6 +438,9 @@ class LocalQwenRanker:
                 # failure falls back to the full frozen candidate order.
                 attempts = 1
                 meta["attempts"] = attempts
+                counts = getattr(self, "_last_token_counts", None)
+                if counts and local_idx < len(counts):
+                    meta["input_tokens"], meta["output_tokens"] = counts[local_idx]
                 meta["call_type"] = (
                     call_type
                 )
@@ -481,6 +490,7 @@ class LocalQwenRanker:
             "generation_records": len(
                 self.calls
             ),
+            "token_count_method": "exact per sample (attention mask; output up to EOS)",
             "input_tokens_approx": int(
                 sum(
                     x.input_tokens

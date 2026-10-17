@@ -190,3 +190,20 @@ class StayPromptTest(unittest.TestCase):
         self.assertIn("behavior pattern: not available.", na)
         v1 = append_order1_persistence_prompt(base, {"available": False}, latest, version="v1")
         self.assertIn("Not estimable from the frozen Tree", v1)
+
+
+class CostTest(unittest.TestCase):
+    def test_per_user_and_shared(self):
+        from bt4rec.eval.cost import CostTracker
+        t = CostTracker("x")
+        t.llm("profile", "u1", 100, 10)
+        t.llm("profile", "u2", 50, 5)
+        t.llm("knowledge", None, 30, 3)
+        t.llm("merge", None, 7, 1, phase="offline")
+        s = t.summary(["u1", "u2"])
+        self.assertEqual(s["online"]["llm_calls_total"], 3)
+        self.assertAlmostEqual(s["online"]["llm_calls_per_user"], 1.5)
+        self.assertAlmostEqual(s["online"]["input_tokens_per_user"], 90.0)
+        self.assertEqual(s["online"]["shared_calls"]["calls"], 1)
+        self.assertEqual(s["online"]["attributable_calls_per_user"]["mean"], 1.0)
+        self.assertAlmostEqual(s["end_to_end_per_eval_user"]["llm_calls"], 2.0)
