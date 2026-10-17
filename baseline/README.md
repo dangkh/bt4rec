@@ -12,6 +12,8 @@ Không cần đặt `PYTHONPATH` (script tự thêm `src/`).
 | `i2agent.py --variant direct` | i2Agent chấm thẳng 20 candidate, không có prior Native | `i2agent_direct/` |
 | `amem_build_memory.py` | aMem4Rec: global memory epsilon-net + co-occurrence, dựng từ `precomputed/<DS>/train_shared.jsonl` (chính behaviour CoMemTree dùng để build Tree) | `amem/global_memory.json` |
 | `amem_inference.py` | aMem4Rec retrieval + ranking (`--no_memory`: cùng prompt, không memory) | `amem/`, `amem_no_memory/` |
+| `memrec_main.py` (+ `memrec/`) | MemRec: warm-up dựng memory trên TRAIN (Stage-R → ReRank → Stage-W), test với memory đóng băng | `memrec/` |
+| `allmrec_main.py` (+ `allmrec/`) | A-LLMRec: SASRec → Stage 1 alignment → Stage 2 Qwen projection; **chỉ 1000 user, tối đa 20 interaction cho mọi giai đoạn** | `allmrec/` |
 | `comemtree_baselines.py` | Random / Pop / LightGCN / SASRec (train trên 1000 user, full history) | `<tag>/` |
 
 ## Chi phí (mọi phương pháp cùng một định dạng `cost_summary.json`, schema `bt4rec_cost_v1`)
@@ -33,6 +35,8 @@ Không cần đặt `PYTHONPATH` (script tự thêm `src/`).
 | i2Agent direct | 4 + 1 call knowledge dùng chung | 4/user (probe, profile, dynamic interest, dynamic profile) + 1 knowledge |
 | i2Agent prior | 4 + 1 Native (đọc từ file, token cộng vào nếu file có ghi) | như trên |
 | aMem4Rec | 1 + 1 embedding query; offline: evolution/merge | global pool (số prototype cuối, merge, evolution, link) |
+| MemRec | 2 (Stage-R + ReRank); offline warm-up ≈ 2–3/train user | user profile + item memory (Stage-W) |
+| A-LLMRec | 1; offline: Stage-2 training pass (epochs × user) | 0 (tham số) |
 | Random/Pop/LightGCN/SASRec | 0 | 0 (ghi số tham số) |
 
 CoMemTree (`python -m bt4rec.cli.run`) giờ cũng ghi `cost_summary.json` trong run dir
