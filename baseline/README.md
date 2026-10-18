@@ -11,7 +11,7 @@ Không cần đặt `PYTHONPATH` (script tự thêm `src/`).
 | `i2agent.py --variant prior` | i2Agent rerank trên ranking Native (`base_recommender_ranking_prior`) | `i2agent_prior/` |
 | `i2agent.py --variant direct` | i2Agent chấm thẳng 20 candidate, không có prior Native | `i2agent_direct/` |
 | `amem_build_memory.py` | aMem4Rec: global memory epsilon-net + co-occurrence, dựng từ `precomputed/<DS>/train_shared.jsonl` (chính behaviour CoMemTree dùng để build Tree) | `amem/global_memory.json` |
-| `amem_inference.py` | aMem4Rec retrieval + ranking (`--no_memory`: cùng prompt, không memory) | `amem/`, `amem_no_memory/` |
+| `amem_inference.py` | aMem4Rec retrieval + ranking (`--no_memory`: cùng prompt, không memory; `--raw_memory`: **bỏ qua bước build**, retrieve thẳng từ các window behaviour thô trong `train_shared.jsonl`) | `amem/`, `amem_no_memory/`, `amem_raw_memory/` |
 | `memrec_main.py` (+ `memrec/`) | MemRec: warm-up dựng memory trên TRAIN (Stage-R → ReRank → Stage-W), test với memory đóng băng | `memrec/` |
 | `allmrec_main.py` (+ `allmrec/`) | A-LLMRec: SASRec → Stage 1 alignment → Stage 2 Qwen projection; **chỉ 1000 user, tối đa 20 interaction cho mọi giai đoạn** | `allmrec/` |
 | `comemtree_baselines.py` | Random / Pop / LightGCN / SASRec (train trên 1000 user, full history) | `<tag>/` |

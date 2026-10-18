@@ -2,12 +2,13 @@
 # Controlled ranking ablation (replaces run_bt4rec_ablation.sh,
 # run_comemtree_behavior_ablation_protocol.sh and run_recent3_tree_protocol.sh).
 # Usage: CUDA_VISIBLE_DEVICES=0 bash scripts/05_run_ablation.sh CDs {validate|prompts|test|main}
-# Modes (MODES=comma list): native, latest_only, latest_how, random_how, global_continuation,
+# Modes (MODES=comma list): native, latest_only, latest_how, random_how, random_only, global_continuation,
 #   pmn, tree, oracle, recent3, recent3_tree, tree_original, stay_only, tree_stay,
 #   tree_original_stay, recent3_tree_stay.
 # Examples:
 #   MODES=tree,tree_stay bash scripts/05_run_ablation.sh CDs main
 #   MODES=recent3,recent3_tree bash scripts/05_run_ablation.sh CDs main
+#   MODES=random_how,random_only bash scripts/05_run_ablation.sh CDs main   # random HOW with / without latest WHAT
 source "$(dirname "$0")/_common.sh" "${1:-CDs}"
 STAGE="${2:-validate}"
 SUB=""; [[ "${BACKEND:-gemma}" == qwen ]] && SUB="/qwen"

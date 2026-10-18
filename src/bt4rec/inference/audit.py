@@ -97,7 +97,7 @@ def audit_profile_source_restrictions(args, users, sequences, modes):
         raise ValueError('Source cohort file empty')
     full_eval = set(load_user_ids_file(args.user_ids_file))
     forbidden = full_eval if args.exclude_all_eval_sources else set()
-    if 'random_how' in modes or 'pmn' in modes:
+    if {'random_how','random_only'} & set(modes) or 'pmn' in modes:
         print('[SOURCE] train_cohort=', len(allowed) if allowed is not None else 'unrestricted',
               ' eval_excluded=',len(forbidden), ' source/eval overlap prohibited self-match always',flush=True)
     return allowed, forbidden
@@ -108,7 +108,7 @@ def manifest_checkpoint(args, modes, users):
         'candidate_file':args.candidate_file, 'behavior_cache':args.precomputed_behaviors,
         'tree_json':args.tree_json, 'states_json':args.states_json,
         'sequences':args.sequences, 'user_ids_file':args.user_ids_file,
-        'train_behaviors':args.train_behaviors if 'random_how' in modes else None,
+        'train_behaviors':args.train_behaviors if {'random_how','random_only'} & set(modes) else None,
         'pmn_summaries':args.pmn_summaries if 'pmn' in modes else None,
         'oracle_behaviors':args.oracle_behaviors if 'oracle' in modes else None,
         'source_user_ids_file':args.source_user_ids_file,

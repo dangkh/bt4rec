@@ -15,6 +15,13 @@
 
   python baseline/amem_inference.py --dataset CDs
   python baseline/amem_inference.py --dataset CDs --no_memory      # same prompt, no memory
+  python baseline/amem_inference.py --dataset CDs --raw_memory     # same prompt, NO build step
+
+--raw_memory skips baseline/amem_build_memory.py entirely: every local behaviour window
+of precomputed/<DS>/train_shared.jsonl (train_users_1000 only) is one memory row, embedded
+on the fly with the same text + embedding model as the builder. No epsilon-net, no
+centering, no Gemma evolution/merge, no co-occurrence links. Retrieval (k, query text,
+FAISS exact cosine) and the ranking prompt are unchanged.
 """
 import argparse, json, os, random, sys, time, re
 from unsloth import FastLanguageModel  # Import before torch/transformers.
@@ -188,6 +195,93 @@ class FlatMemoryRetriever:
                 if self.search_calls else 0.0
             ),
         }
+
+
+RAW_PRECOMPUTE_SCHEMA = "amem_local_memory_dual_behavior_v4"  # same contract as the builder
+
+
+def raw_memory_text(rec: Dict[str, Any]) -> str:
+    """Identical to amem_build_memory.canonical_text_from_record (not imported: that
+    module loads Unsloth/Gemma at import time)."""
+    kw = rec.get("keywords", [])
+    if not isinstance(kw, list):
+        kw = [str(kw)]
+    return (f"{rec.get('behavior_explanation', '')} "
+            f"{rec.get('pattern_description', '')} "
+            f"{' '.join(str(x) for x in kw)}").strip()
+
+
+def load_raw_local_memories(path: str, allowed_users: Optional[set]) -> List[Dict[str, Any]]:
+    rows = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line_no, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            schema = rec.get("schema_version")
+            if schema is not None and schema != RAW_PRECOMPUTE_SCHEMA:
+                raise RuntimeError(f"{path}:{line_no}: schema_version={schema!r}, expected {RAW_PRECOMPUTE_SCHEMA!r}")
+            if rec.get("parse_ok") is False:
+                continue
+            missing = [k for k in ("precompute_id", "behavior_explanation", "pattern_description", "keywords")
+                       if k not in rec]
+            if missing:
+                raise RuntimeError(f"{path}:{line_no}: missing fields {missing}")
+            uid = rec.get("user_id")
+            if allowed_users is not None and str(uid) not in allowed_users:
+                continue
+            rows.append(rec)
+    rows.sort(key=lambda r: int(r["precompute_id"]))
+    ids = [int(r["precompute_id"]) for r in rows]
+    if len(ids) != len(set(ids)):
+        raise RuntimeError("Duplicate precompute_id values in raw memory input")
+    if not rows:
+        raise RuntimeError(f"No raw local memories in {path} for the selected train users")
+    return rows
+
+
+class RawMemoryRetriever(FlatMemoryRetriever):
+    """aMem4Rec without the build step: one memory per local behaviour window."""
+
+    def __init__(self, precomputed_path: str, embedding_model: str, device: str = "auto",
+                 allowed_users: Optional[set] = None, batch_size: int = 64):
+        records = load_raw_local_memories(precomputed_path, allowed_users)
+        if device == "auto":
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.encoder = SentenceTransformer(embedding_model, device=device)
+        texts = [raw_memory_text(r) for r in records]
+        t0 = time.perf_counter()
+        embs = self.encoder.encode(texts, batch_size=batch_size, convert_to_numpy=True,
+                                   normalize_embeddings=True, show_progress_bar=True)
+        self.encode_time = time.perf_counter() - t0
+        embs = np.ascontiguousarray(np.asarray(embs, dtype=np.float32))
+        faiss.normalize_L2(embs)
+        self.memories = [{
+            "thought_id": int(r["precompute_id"]),
+            "behavior_explanation": str(r.get("behavior_explanation", "")),
+            "pattern_description": str(r.get("pattern_description", "")),
+            "source_user_id": None if r.get("user_id") is None else str(r.get("user_id")),
+            "source_window_index": r.get("window_index"),
+        } for r in records]
+        self.num_texts = len(texts)
+        self.num_source_users = len({m["source_user_id"] for m in self.memories})
+        self.mu = None  # raw rows are NOT centered; query is not centered either
+        self.num_links = 0
+        self.dim = embs.shape[1]
+        self.index = faiss.IndexFlatIP(self.dim)
+        self.index.add(embs)
+        self.search_calls = 0
+        self.total_search_time = 0.0
+        print(f"Raw memory (no build): {len(self.memories)} local windows from "
+              f"{self.num_source_users} users; dim={self.dim}; encode {self.encode_time:.1f}s")
+
+    def stats(self):
+        out = super().stats()
+        out.update({"memory_source": "raw_local_windows_no_build",
+                    "num_source_users": self.num_source_users,
+                    "offline_encode_time_sec": round(self.encode_time, 4)})
+        return out
 
 
 class LocalRanker:
@@ -621,6 +715,13 @@ def parse_args():
     p.add_argument("--save_every", type=int, default=50)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--no_memory", action="store_true", help="same prompt without retrieved memory")
+    p.add_argument("--raw_memory", action="store_true",
+                   help="skip amem_build_memory.py: retrieve directly from raw local behaviour windows")
+    p.add_argument("--precomputed", type=str, default=None,
+                   help="--raw_memory input; default precomputed/<DS>/train_shared.jsonl")
+    p.add_argument("--train_users_file", "--train-users-file", dest="train_users_file", type=str, default=None,
+                   help="--raw_memory source users; default data/<DS>/protocol/train_users_1000.json; 'none' = all")
+    p.add_argument("--embedding_batch_size", type=int, default=64)
     p.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
     a = p.parse_args()
     cfg = {}
@@ -636,7 +737,18 @@ def parse_args():
         a.candidate_file = a.candidate_file or cfg.get("candidate_file")
         out_dir = Path("results/baselines") / a.dataset
         a.global_memory = a.global_memory or str(out_dir / "amem" / "global_memory.json")
-        a.output = a.output or str(out_dir / ("amem_no_memory" if a.no_memory else "amem") / "amem_rankings.json")
+        tag = "amem_no_memory" if a.no_memory else ("amem_raw_memory" if a.raw_memory else "amem")
+        a.output = a.output or str(out_dir / tag / "amem_rankings.json")
+        if a.precomputed is None:
+            base = Path(cfg.get("precomputed_dir", f"precomputed/{a.dataset}"))
+            cand = [base / "train_shared.jsonl", base / "qwen" / "train_shared.jsonl"]
+            a.precomputed = str(next((c for c in cand if c.exists()), cand[0]))
+        if a.train_users_file is None:
+            a.train_users_file = cfg.get("train_users")
+    if a.no_memory and a.raw_memory:
+        raise SystemExit("--no_memory and --raw_memory are mutually exclusive")
+    if a.train_users_file and a.train_users_file.lower() == "none":
+        a.train_users_file = None
     if a.history_size is None:
         a.history_size = int(cfg.get("history_size", 20))
     for name in ("items", "sequences", "user_ids_file", "candidate_file", "output"):
@@ -656,7 +768,8 @@ def load_user_list(path: str) -> List[str]:
 
 
 def build_cost(args, results, user_ids, retriever_stats):
-    cost = CostTracker("amem4rec_no_memory" if args.no_memory else "amem4rec")
+    cost = CostTracker("amem4rec_no_memory" if args.no_memory else
+                       ("amem4rec_raw_memory" if args.raw_memory else "amem4rec"))
     by_user = {str(r["user_id"]): r for r in results}
     for uid in user_ids:
         r = by_user.get(uid)
@@ -671,9 +784,25 @@ def build_cost(args, results, user_ids, retriever_stats):
     if args.no_memory:
         summary["memory"] = memory_block(0, {u: 0 for u in user_ids}, scope="none")
         return summary
-    build_cost_path = Path(args.global_memory).with_name(Path(args.global_memory).stem + "_cost_summary.json")
     n = max(1, len(user_ids))
-    if build_cost_path.exists():
+    if args.raw_memory:
+        # No build: 0 LLM calls offline; only the one-off embedding of local windows.
+        nm = int(retriever_stats.get("num_memories") or 0)
+        summary["offline"] = {"llm_calls_total": 0, "input_tokens_total": 0, "output_tokens_total": 0,
+                              "total_tokens_total": 0, "llm_calls_per_user": 0.0,
+                              "embedding": {"calls": 1, "texts": nm},
+                              "encode_time_sec": retriever_stats.get("offline_encode_time_sec"),
+                              "note": "raw local windows embedded at inference start; no Gemma build"}
+        summary["upstream_reused"] = {"behaviour_extraction": "precomputed train_shared.jsonl "
+                                      "(1 LLM call / 3-item window, shared with CoMemTree)",
+                                      "precomputed": args.precomputed}
+        summary["memory"] = memory_block(nm, {}, scope="global pool of raw local windows (no build)",
+                                         source_users=retriever_stats.get("num_source_users"))
+    build_cost_path = (None if args.raw_memory else
+                       Path(args.global_memory).with_name(Path(args.global_memory).stem + "_cost_summary.json"))
+    if args.raw_memory:
+        pass  # offline/memory already filled above
+    elif build_cost_path.exists():
         build = load_json(str(build_cost_path))
         off = build.get("offline", {})
         for key in ("llm_calls", "input_tokens", "output_tokens", "total_tokens"):
@@ -706,7 +835,10 @@ def main():
     for p in [args.items, args.sequences, args.user_ids_file]:
         if not os.path.exists(p):
             raise FileNotFoundError(p)
-    if not args.no_memory:
+    if args.raw_memory:
+        if not args.precomputed or not os.path.exists(args.precomputed):
+            raise FileNotFoundError(f"--raw_memory needs --precomputed train_shared.jsonl: {args.precomputed}")
+    elif not args.no_memory:
         if not args.global_memory:
             raise ValueError("--global_memory is required unless --no_memory is used")
         if not os.path.exists(args.global_memory):
@@ -728,7 +860,11 @@ def main():
     candidate_rows = load_frozen_candidates(args.candidate_file, user_ids, sequences, negatives)
 
     retriever = None
-    if not args.no_memory:
+    if args.raw_memory:
+        allowed = set(load_user_list(args.train_users_file)) if args.train_users_file else None
+        retriever = RawMemoryRetriever(args.precomputed, args.embedding_model, args.embedding_device,
+                                       allowed_users=allowed, batch_size=args.embedding_batch_size)
+    elif not args.no_memory:
         retriever = FlatMemoryRetriever(
             args.global_memory,
             args.embedding_model,
@@ -841,6 +977,8 @@ def main():
         },
         "elapsed_sec_this_run": round(time.perf_counter() - t0, 4),
         "use_memory": not args.no_memory,
+        "memory_source": ("none" if args.no_memory else
+                          "raw_local_windows_no_build" if args.raw_memory else "built_global_memory"),
         "k_memories": args.k_memories,
         "history_size": args.history_size,
         "llm_batch_size": args.llm_batch_size,

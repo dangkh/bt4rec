@@ -126,7 +126,7 @@ from bt4rec.inference.audit import (
     manifest_checkpoint,
     validate_tree_provenance,
 )
-from bt4rec.inference.constants import RANK_PROMPT_VERSION, SCHEMA_VERSION, STAY_MODES, STAY_PROMPT_VERSIONS
+from bt4rec.inference.constants import RANDOM_SOURCE_MODES, RANK_PROMPT_VERSION, SCHEMA_VERSION, STAY_MODES, STAY_PROMPT_VERSIONS
 from bt4rec.inference.inputs import resolve_inputs, resolve_source_files
 from bt4rec.llm.encoder import QwenEncoder
 from bt4rec.llm.ranker import LocalQwenRanker
@@ -318,12 +318,13 @@ def main():
     audit = validate_frozen_users(users,sequences,frozen,test_cache,items,
                                   a.candidate_size,a.strict_cache_history)
     train_allowed, forbidden_sources = audit_profile_source_restrictions(a,users,sequences,modes)
+    need_random = bool(RANDOM_SOURCE_MODES & set(modes))
     train_how = (read_train_how(a.train_behaviors,train_allowed,forbidden_sources)
-                 if 'random_how' in modes else None)
+                 if need_random else None)
     # Every target needs at least one OTHER source user (self is always excluded).
     # The legacy check required a source outside the eval cohort, which always
     # failed under the frozen protocol where train_users == eval_users.
-    if 'random_how' in modes:
+    if need_random:
         lacking=[u for u in users if not (set(train_how)-{u})]
         if lacking:
             raise ValueError(f'Random HOW lacks a distinct source user for {len(lacking)} targets, first={lacking[:5]}')
@@ -414,7 +415,8 @@ def main():
             metadata={}
             if 'latest_how' in modes:
                 hows['latest_how']=how_only(test_cache[uid]['generated_behaviors'][-1])
-            if 'random_how' in modes:
+            if need_random:
+                # random_only reuses this exact sample (same seed/uid) without latest WHAT.
                 hows['random_how'],metadata['random_how']=choose_random_how(train_how,uid,a.seed)
             if 'global_continuation' in modes:
                 hows['global_continuation']=global_how

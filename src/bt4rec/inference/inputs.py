@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from bt4rec.inference.constants import RANDOM_SOURCE_MODES
+
 
 def canonical_dataset(value: str) -> str:
     key = value.strip().lower().replace("-", "_").replace(" ", "_")
@@ -139,7 +141,8 @@ def resolve_inputs(args: argparse.Namespace) -> argparse.Namespace:
 
 
 def resolve_source_files(args, modes):
-    if args.train_behaviors is None and 'random_how' in modes:
+    need_random = bool(RANDOM_SOURCE_MODES & set(modes))
+    if args.train_behaviors is None and need_random:
         args.train_behaviors = str(Path(args.precomputed_behaviors).parent/'train_shared.jsonl')
     if args.pmn_summaries is None and 'pmn' in modes:
         args.pmn_summaries = str(Path(args.precomputed_behaviors).parent/'pmn_preference_summaries_gemma_v4.jsonl')
@@ -151,11 +154,11 @@ def resolve_source_files(args, modes):
             if guess.is_file():
                 args.source_user_ids_file = str(guess)
                 break
-    used = [('train-behaviors',args.train_behaviors,'random_how'),
-            ('pmn-summaries',args.pmn_summaries,'pmn'),
-            ('oracle-behaviors',args.oracle_behaviors,'oracle')]
-    for name,path,mode in used:
-        if mode in modes and (not path or not Path(path).is_file()):
+    used = [('train-behaviors',args.train_behaviors,need_random,'random_how/random_only'),
+            ('pmn-summaries',args.pmn_summaries,'pmn' in modes,'pmn'),
+            ('oracle-behaviors',args.oracle_behaviors,'oracle' in modes,'oracle')]
+    for name,path,needed,mode in used:
+        if needed and (not path or not Path(path).is_file()):
             raise FileNotFoundError(f'--{name} required for {mode}: {path}')
-    if 'random_how' in modes and Path(args.train_behaviors).resolve()==Path(args.precomputed_behaviors).resolve():
+    if need_random and Path(args.train_behaviors).resolve()==Path(args.precomputed_behaviors).resolve():
         raise ValueError('Random HOW training stream MUST differ from target test behavior cache')

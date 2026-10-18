@@ -8,7 +8,7 @@ RANK_PROMPT_VERSION = "bt4rec_controlled_additional_how_list_v1"
 
 
 AB_MODES = (
-    'latest_only', 'latest_how', 'random_how', 'global_continuation',
+    'latest_only', 'latest_how', 'random_how', 'random_only', 'global_continuation',
     'pmn', 'tree', 'oracle', 'recent3', 'recent3_tree',
     'tree_original', 'native',
     'stay_only', 'tree_stay', 'tree_original_stay', 'recent3_tree_stay',
@@ -26,3 +26,9 @@ STAY_PROMPT_VERSION = STAY_PROMPT_VERSIONS['v2']
 
 
 STAY_MODES = frozenset(('stay_only', 'tree_stay', 'tree_original_stay', 'recent3_tree_stay'))
+
+
+# Modes that need a random TRAIN-source HOW.  random_only = random_how WITHOUT the
+# target user's latest WHAT (section 2 'Not provided.'); both use the SAME sampled
+# HOW per (seed, user), so the two runs are directly paired.
+RANDOM_SOURCE_MODES = frozenset(('random_how', 'random_only'))
