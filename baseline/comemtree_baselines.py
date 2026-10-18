@@ -152,11 +152,14 @@ class Data:
                 continue
             if not isinstance(rec, dict):
                 raise ValueError(f"user {uid}: expected a dict with train/test")
-            tr = as_str_list(rec.get("train"))  # FULL train history, never truncated
+            tr = as_str_list(rec.get("train"))  # full TRAIN history ...
+            if args.max_history > 0:
+                tr = tr[-args.max_history:]       # ... or only the last --max-history items
             ignored_val += sum(len(as_str_list(rec.get(k))) for k in ("val", "valid", "validation"))
             if tr:
                 self.train[uid] = tr
         self.ignored_validation_items = ignored_val
+        self.max_history = int(args.max_history)
         self.users: List[str] = sorted(self.train)
         self.user_index = {u: i for i, u in enumerate(self.users)}
 
@@ -228,7 +231,8 @@ class Data:
             "ignored_validation_items_in_source": self.ignored_validation_items,
             "n_eval_users": len(self.eval_users),
             "eval_users_are_part_of_training": True,
-            "train_history_truncated": False,
+            "train_history_truncated": self.max_history > 0,
+            "max_history": self.max_history or None,
             "test_items_used_for_training": False,
             "cold_candidate_rate": cold_c / len(cand_all),
             "cold_target_rate": cold_t / len(self.eval_users),
@@ -712,6 +716,9 @@ def parse_args() -> argparse.Namespace:
                         "(default data/<dataset>/protocol/train_users_1000.json; eval users always included)")
     p.add_argument("--train-all-users", action="store_true",
                    help="train on every user in --sequences instead of --train-users-file")
+    p.add_argument("--max-history", type=int, default=0,
+                   help="keep only the last N TRAIN items per user for training AND scoring "
+                        "(Pop/LightGCN/SASRec); 0 = full history")
     p.add_argument("--random-repeats", type=int, default=100, help="seeded repetitions of the random ranking")
     p.add_argument("--output-dir", default=None, help="default results/baselines/<dataset>")
     p.add_argument("--seed", type=int, default=42)
@@ -750,8 +757,12 @@ def parse_args() -> argparse.Namespace:
     else:
         a.train_users_file = a.train_users_file or str(root / "protocol" / "train_users_1000.json")
     tag = "all_users" if a.train_users_file is None else Path(a.train_users_file).stem
+    if a.max_history > 0:
+        tag += f"_h{a.max_history}"
     a.output_dir = a.output_dir or f"results/baselines/{a.dataset}/{tag}"
     a.max_len = a.max_len or DEFAULT_MAX_LEN.get(a.dataset, 50)
+    if a.max_history > 0:
+        a.max_len = min(a.max_len, a.max_history)  # SASRec never sees more than N items
     a.dropout = a.dropout if a.dropout is not None else (0.2 if a.dataset == "ML" else 0.5)
     return a
 
@@ -785,7 +796,9 @@ def main() -> None:
         rows = res.pop("_rows")
         res.update({"dataset": a.dataset, "data_stats": stats, "runtime_sec": round(time.time() - t, 1),
                     "train_users": data.train_user_source,
-                    "protocol": "full train histories (no truncation), penultimate-item early stopping, "
+                    "protocol": (f"last {a.max_history} train items per user" if a.max_history > 0
+                                 else "full train histories (no truncation)")
+                                + ", penultimate-item early stopping, "
                                 "frozen eval users + 20 frozen candidates"})
         save_json(out_dir / f"{m}_metrics.json", res)
         # Same cost layout as the LLM methods (bt4rec_cost_v1): no LLM calls / memories.
