@@ -1,0 +1,11 @@
+# Amazon Books
+dataset: Books
+aliases: [books, book]
+history_size: 20          # train items shown to the ranker and used for behavior windows
+window_size: 3
+tree_dir: trees/Books_1000_20
+protocol_dir: data/Books/protocol
+eval_users: data/Books/protocol/eval_users_1000.json
+train_users: data/Books/protocol/train_users_1000.json
+candidate_file: data/Books/protocol/user_candidates_testpool1000_seed42.json
+precomputed_dir: precomputed/Books          # gemma backend; qwen writes to precomputed/Books/qwen
