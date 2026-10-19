@@ -61,6 +61,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--test-output", help="Optional output override (default: <output-dir>/test_shared.jsonl)")
     p.add_argument("--history-size", type=int, default=20, help="0 = unlimited; cap raw items BEFORE metadata filtering")
     p.add_argument("--window-size", type=int, default=3)
+    p.add_argument("--behavior-domain", choices=["generic", "books"], default="generic",
+                   help="gemma backend only: domain-specific semantic examples in the extraction "
+                        "prompt (books = genre/series/author/topic). Changes the prompt version, so "
+                        "use a NEW --output-dir; Tree and inference must use the same variant.")
     p.add_argument("--recent-behaviors", type=int, default=5)
     p.add_argument("--plan-only", action="store_true", help="Audit input and cache reuse; no LLM/GPU needed")
     p.add_argument("--max-attempts", type=int, default=be.DEFAULTS["max_attempts"],
@@ -143,6 +147,11 @@ def verify_train_cache_metadata(path: str | None, args) -> None:
 def main(argv=None) -> None:
     args = parse_args(argv)
     be = BACKENDS[args.backend]
+    if args.behavior_domain != "generic":
+        if not hasattr(be, "set_domain"):
+            raise ValueError(f"--behavior-domain is only implemented for the gemma backend")
+        be.set_domain(args.behavior_domain)
+        print(f"[PROMPT] behaviour extraction domain={args.behavior_domain} version={be.PROMPT_VERSION}", flush=True)
     resolve_paths(args, be)
     if args.window_size <= 0 or args.history_size < 0 or args.llm_batch_size <= 0 or args.max_attempts < 1:
         raise ValueError("window-size and batch-size must be positive, history-size non-negative")
