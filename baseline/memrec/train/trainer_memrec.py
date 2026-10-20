@@ -1347,8 +1347,6 @@ class MemRecTrainer:
         wrap(self.agent.manager, 'run_stage_w', 'stage_w')
         wrap(self.agent.reranker, 'rerank', 'stage_rerank')
         initial_item_memories = dict(self.agent.storage.item_descriptions)
-        from collections import Counter as _Counter
-        self._write_stats = _Counter()
         # Each round reveals one further TRAIN interaction. All train-user histories
         # are clipped to that round before graph construction, including neighbors.
         try:
@@ -1385,18 +1383,10 @@ class MemRecTrainer:
                         # Preserve original MemRec warm-up trigger: target in top 10.
                         wrote = ranked.index(target) < 10
                         if wrote:
-                            wres = self.agent.write(u, {'action': 'CLICK', 'item_id': target,
+                            self.agent.write(u, {'action': 'CLICK', 'item_id': target,
                                                  'position': ranked.index(target)},
                                              details.get('facets', []),
                                              pruned_subgraph=details.get('pruned_subgraph'))
-                            st = (wres or {}).get('stats', {}) if isinstance(wres, dict) else {}
-                            self._write_stats['stage_w_calls'] += 1
-                            self._write_stats['user_self_writes'] += int(st.get('user_applied', 0))
-                            self._write_stats['clicked_item_writes'] += int(st.get('item_applied', 0))
-                            self._write_stats['user_neighbor_writes'] += len(st.get('user_neighbors_propagated', []))
-                            self._write_stats['item_neighbor_writes'] += len(st.get('item_neighbors_propagated', []))
-                            if not st.get('item_applied'):
-                                self._write_stats['stage_w_without_item_memory'] += 1
                         warmup_records.append({'user_id': ds.raw_user_ids[u], 'round': round_idx+1,
                                                'target': ds.raw_item_ids[target], 'stage_w': wrote})
         finally:
@@ -1472,24 +1462,15 @@ class MemRecTrainer:
         profiles = {ds.raw_user_ids.get(int(k), str(k)): v for k, v in storage.user_profiles.items()}
         changed_items = sum(1 for k, v in storage.item_descriptions.items()
                             if initial_item_memories.get(k) != v)
-        ws = dict(getattr(self, '_write_stats', {}))
-        if ws.get('stage_w_calls') and not changed_items:
-            print('[WARN] Stage-W ran but no item memory was rewritten: the Stage-W JSON had an empty '
-                  '"item_memory" and no item neighbour patches (check llm_calls / conversations).', flush=True)
         memory = memory_block(
             total=len(profiles) + changed_items,
             per_user={u: int(u in profiles) for u in eval_raw},
             kinds={'user_profile_memories': len(profiles),
                    'item_memories_rewritten': changed_items,
-                   'item_memories_initialized_from_metadata': len(initial_item_memories),
-                   'write_events': ws,
                    'stage_w_writes': int(self.agent.n_stage_w_calls),
                    'storage_updates': int(storage.n_updates),
                    'warmup_rounds': int(self.warmup_rounds if self.warmup_enabled else 0)},
             scope='per-user profiles + item memories (shared), built on TRAIN only; read-only at test',
-            item_memory_note=('Every item starts with "title. category" (no LLM). Only items rewritten by '
-                              'Stage-W (clicked TRAIN target or item neighbour patch) count as created item '
-                              'memories; memories_per_user counts user profiles only.'),
         )
         tracker.write(save_dir / 'cost_summary.json', eval_raw, memory=memory,
                       calls_path=save_dir / 'llm_calls.jsonl',
