@@ -112,6 +112,7 @@ from bt4rec.data.behavior_cache import (
 from bt4rec.data.candidates import get_candidates_for_user, load_candidate_file, validate_frozen_users
 from bt4rec.data.items import as_str_list, get_item_info, normalize_items
 from bt4rec.eval.metrics import (
+    metrics_from_ranks,
     aggregate_complete_intersection,
     aggregate_mode,
     metric_gain,
@@ -186,6 +187,52 @@ def comemtree_cost(a, rows, modes, users, test_cache):
             'online_embedding': {'texts_per_user': (sum(windows.values()) / max(1, len(users))),
                                  'note': 'each behaviour is embedded once to map it to a Tree state'},
             'memory': memory}
+
+
+CSV_METRICS = ('Hit@1','Hit@3','Hit@5','Hit@10','NDCG@1','NDCG@3','NDCG@5','NDCG@10','MRR','MeanRank')
+
+
+def load_mode_checkpoint(path, user_ids):
+    """Finished per-mode rankings for exactly these users (same order), else None."""
+    if not path.is_file():
+        return None
+    rows=read_jsonl(path)
+    if [str(r.get('user_id')) for r in rows]!=[str(u) for u in user_ids]:
+        return None
+    return [(r['ranked_item_ids'],r['meta']) for r in rows]
+
+
+def save_mode_checkpoint(path, prepared, results):
+    tmp=path.with_suffix('.jsonl.tmp')
+    with tmp.open('w',encoding='utf8') as fo:
+        for rec,(ordered,meta) in zip(prepared,results):
+            fo.write(json.dumps({'user_id':rec['user_id'],'ranked_item_ids':ordered,'meta':meta},
+                                ensure_ascii=False)+'\n')
+    tmp.replace(path)
+
+
+def mode_metrics_row(a, run_dir, mode, prepared, results):
+    ranks=[target_rank(ordered,rec['targets'][0]) for rec,(ordered,_) in zip(prepared,results)]
+    m=metrics_from_ranks(ranks) or {}
+    complete=sum(bool(meta.get('parse_complete')) for _,meta in results)
+    row={'finished_at':datetime.now(ZoneInfo('Australia/Sydney')).strftime('%Y-%m-%d %H:%M:%S'),
+         'dataset':a.dataset,'run_dir':str(run_dir),'mode':mode,
+         'tree':Path(a.tree_dir).name,'tree_max_query_order':a.tree_max_query_order,
+         'history_size':a.history_size,'stay_prompt':a.stay_prompt,'users':len(ranks),
+         'parse_complete_rate':round(complete/max(1,len(ranks)),4)}
+    row.update({k:round(float(m[k]),4) for k in CSV_METRICS if k in m})
+    return row
+
+
+def append_metrics_csv(path, row):
+    import csv
+    path.parent.mkdir(parents=True,exist_ok=True)
+    new=not path.exists() or path.stat().st_size==0
+    with path.open('a',newline='',encoding='utf8') as f:
+        w=csv.DictWriter(f,fieldnames=list(row))
+        if new:
+            w.writeheader()
+        w.writerow(row)
 
 
 def parse_args() -> argparse.Namespace:
@@ -270,6 +317,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--stay-prompt", choices=["v2", "v1"], default="v2",
                    help="Section 4 wording for *_stay modes. v2 (default): latest WHAT + P(stay), "
                         "short. v1: legacy wording from inference_bt4rec_ablation.py.")
+    p.add_argument("--metrics-csv", default=None,
+                   help="Optional extra CSV (e.g. results/all_metrics.csv) that every finished mode is "
+                        "appended to; <run-dir>/metrics_by_mode.csv is always written.")
     p.add_argument("--modes", default="latest_only,latest_how,random_how,global_continuation,pmn,tree,oracle",
                    help="Comma-separated modes. Extra: recent3,recent3_tree,tree_original,native."
                         " All modes share identical frozen history/candidates/parser.")
@@ -486,12 +536,29 @@ def main():
     ranker=LocalQwenRanker(a.model,a.max_seq_length,a.load_in_4bit,
                            a.rank_max_new_tokens,a.temperature,a.seed)
     ranked_by_mode={}
+    mode_dir=run_dir/'mode_rankings'
+    mode_dir.mkdir(parents=True,exist_ok=True)
+    pending_ids=[rec['user_id'] for rec in prepared]
     for mode in modes:
+        ckpt=mode_dir/f'{mode}.jsonl'
+        cached=load_mode_checkpoint(ckpt,pending_ids)
+        if cached is not None:
+            print(f'[RANK] {mode}: reusing finished checkpoint {ckpt}',flush=True)
+            ranked_by_mode[mode]=cached
+            continue
         print(f'[RANK] {mode}: {len(prepared)} users; batch={a.llm_batch_size}',flush=True)
         jobs=[{'prebuilt_prompt':rec['prompts'][mode],'candidate_items':rec['candidate_items']}
               for rec in prepared]
         ranked_by_mode[mode]=ranker.rank_jobs(jobs,batch_size=a.llm_batch_size,
                                               call_type=mode,max_retries=0)
+        # Save this mode immediately (rankings + one CSV row) before starting the next one.
+        save_mode_checkpoint(ckpt,prepared,ranked_by_mode[mode])
+        row=mode_metrics_row(a,run_dir,mode,prepared,ranked_by_mode[mode])
+        append_metrics_csv(run_dir/'metrics_by_mode.csv',row)
+        if a.metrics_csv:
+            append_metrics_csv(Path(a.metrics_csv),row)
+        print(f'[DONE] {mode}: ' + ' '.join(f'{k}={row[k]}' for k in ('NDCG@10','Hit@5','MRR','parse_complete_rate'))
+              + f' -> {run_dir/"metrics_by_mode.csv"}',flush=True)
     for i,rec in enumerate(tqdm(prepared,desc='Save ablation rankings',unit='user')):
         ranks={}
         for mode in modes:
