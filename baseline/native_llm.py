@@ -37,7 +37,7 @@ from bt4rec.data.candidates import get_candidates_for_user, load_candidate_file 
 from bt4rec.data.items import as_str_list, get_item_info, normalize_items  # noqa: E402
 from bt4rec.eval.cost import CostTracker, memory_block  # noqa: E402
 from bt4rec.eval.metrics import aggregate_mode, target_rank  # noqa: E402
-from bt4rec.ranking.prompts import apply_domain_notes, build_rank_prompt  # noqa: E402
+from bt4rec.ranking.prompts import build_rank_prompt  # noqa: E402
 
 SCHEMA = "native_comemtree_template_v1"
 
@@ -61,8 +61,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--llm-batch-size", type=int, default=8, help="same default as bt4rec.cli.run")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--output-dir", default=None, help="default results/baselines/<DS>/native")
-    p.add_argument("--domain-prompt", choices=["none", "books", "auto"], default="none",
-                   help="same DOMAIN NOTES as bt4rec.cli.run --domain-prompt (auto = books for Books)")
     p.add_argument("--prompts-only", action="store_true", help="write prompts and stop (no GPU)")
     a = p.parse_args()
     cfg = load_dataset_config(a.dataset)
@@ -74,10 +72,7 @@ def parse_args() -> argparse.Namespace:
     a.user_ids_file = a.user_ids_file or cfg["eval_users"]
     a.candidate_file = a.candidate_file or cfg["candidate_file"]
     a.history_size = a.history_size or int(cfg["history_size"])
-    if a.domain_prompt == "auto":
-        a.domain_prompt = "books" if ds == "Books" else "none"
-    suffix = "" if a.domain_prompt == "none" else f"_{a.domain_prompt}"
-    a.output_dir = a.output_dir or str(Path("results/baselines") / ds / f"native{suffix}")
+    a.output_dir = a.output_dir or str(Path("results/baselines") / ds / "native")
     return a
 
 
@@ -102,7 +97,6 @@ def main() -> None:
         cmeta = [get_item_info(x, items) for x in cand_ids]
         prompt = build_rank_prompt(history_items=hist, candidate_items=cmeta,
                                    latest_behavior=None, predicted_transition=None)
-        prompt = apply_domain_notes(prompt, a.domain_prompt)
         jobs.append({"user_id": uid, "prebuilt_prompt": prompt, "candidate_items": cmeta,
                      "candidate_ids": cand_ids, "targets": targets, "history_items": hist})
     print(f"[NATIVE] {a.dataset}: users={len(jobs)} history={a.history_size} "

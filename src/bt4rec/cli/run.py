@@ -270,9 +270,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--stay-prompt", choices=["v2", "v1"], default="v2",
                    help="Section 4 wording for *_stay modes. v2 (default): latest WHAT + P(stay), "
                         "short. v1: legacy wording from inference_bt4rec_ablation.py.")
-    p.add_argument("--domain-prompt", choices=["none", "books", "auto"], default="none",
-                   help="Add dataset-specific DOMAIN NOTES to EVERY mode (native included). "
-                        "auto = books for --dataset Books, none otherwise. Default none = old prompts.")
     p.add_argument("--modes", default="latest_only,latest_how,random_how,global_continuation,pmn,tree,oracle",
                    help="Comma-separated modes. Extra: recent3,recent3_tree,tree_original,native."
                         " All modes share identical frozen history/candidates/parser.")
@@ -298,9 +295,6 @@ def parse_args() -> argparse.Namespace:
 def main():
     a = resolve_inputs(parse_args())
     modes = requested_modes(a.modes)
-    if a.domain_prompt == 'auto':
-        a.domain_prompt = 'books' if a.dataset == 'Books' else 'none'
-    print(f'[PROMPT] domain notes: {a.domain_prompt}', flush=True)
     set_seed(a.seed)
     resolve_source_files(a,modes)
     items = normalize_items(load_json(a.items))
@@ -456,8 +450,7 @@ def main():
                  'guidance_metadata':metadata,'tree_result':tr,
                  'state_mappings':mapped.get(uid,[]),'tree_query_state_suffix':suffix,
                  'predicted_transition':predicted, 'last_state_persistence':stay,
-                 'stay_prompt':a.stay_prompt, 'latest_how':latest_how,
-                 'domain_prompt':a.domain_prompt}
+                 'stay_prompt':a.stay_prompt, 'latest_how':latest_how}
             rec['prompts']={m:mode_prompt(m,rec) for m in modes}
             prepared.append(rec)
         # All prompts generated BEFORE any ranker inference. Their modalities are inspectable.

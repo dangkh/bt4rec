@@ -12,42 +12,6 @@ from bt4rec.behavior.records import SCHEMA_TRAIN
 from bt4rec.behavior.windows import Window, cache_key, make_prompt_summary
 
 PROMPT_VERSION = "dual_view_discriminative_behavior_v2_taxonomy"
-BASE_PROMPT_VERSION = PROMPT_VERSION
-# Optional domain variant (precompute --behavior-domain books). Changes ONLY the
-# semantic-evidence examples (view A); taxonomy and output schema are unchanged.
-# PROMPT_VERSION gets a suffix so caches of different variants never mix.
-DOMAIN = "generic"
-
-_GENERIC_EVIDENCE = """- genre/subgenre or product subcategory;
-- style, mood, theme, or use case;
-- soundtrack / film / game orientation;
-- regional or cultural direction;
-- live / compilation / collection characteristics;
-- creator continuity when it is actually visible;"""
-
-_BOOKS_EVIDENCE = """- genre and subgenre inferred from titles (e.g. cozy mystery, crime thriller, epic or urban
-  fantasy, contemporary / historical / paranormal romance, literary fiction, military history);
-- fiction vs non-fiction, and for non-fiction the topic and purpose (self-help, spirituality,
-  biography, cooking, health, business, education);
-- audience (children, young adult, adult);
-- series membership and reading order when visible in titles (series name, "Book N");
-- author continuity when it is actually visible;
-- tone, themes, setting and era (dark, humorous, faith-based, character-driven, small town);
-- NOTE: the category field is usually just "Books"; do not describe the preference as
-  "books" in general -- name the genre/topic that the titles actually show;"""
-
-_GENERIC_DISAMBIG = '- Different albums/products from the same creator are NOT "same item".'
-_BOOKS_DISAMBIG = ('- Different books by the same author or different volumes of the same series are NOT '
-                   '"same item" (use same creator / same series).')
-
-
-def set_domain(domain: str) -> None:
-    """Select the behaviour-extraction variant before any cache is read or written."""
-    global DOMAIN, PROMPT_VERSION
-    if domain not in ("generic", "books"):
-        raise ValueError(f"Unknown behavior domain {domain!r}")
-    DOMAIN = domain
-    PROMPT_VERSION = BASE_PROMPT_VERSION if domain == "generic" else f"{BASE_PROMPT_VERSION}_{domain}"
 
 
 def build_behavior_extraction_prompt(
@@ -65,16 +29,6 @@ def build_behavior_extraction_prompt(
     IMPORTANT: this stage only sees OBSERVED interactions. It never sees a future
     test/ground-truth item, so there is no oracle leakage.
     """
-    prompt = _build_generic_prompt(interaction_summary)
-    if DOMAIN == "books":
-        for old, new in ((_GENERIC_EVIDENCE, _BOOKS_EVIDENCE), (_GENERIC_DISAMBIG, _BOOKS_DISAMBIG)):
-            if prompt.count(old) != 1:
-                raise AssertionError("Books behaviour prompt: anchor text not found")
-            prompt = prompt.replace(old, new, 1)
-    return prompt
-
-
-def _build_generic_prompt(interaction_summary: List[Dict[str, Any]]) -> str:
     return f"""You are creating a behavioral memory from a SHORT OBSERVED purchase window.
 
 OBSERVED INTERACTIONS:

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from bt4rec.inference.constants import AB_MODES, STAY_MODES
-from bt4rec.ranking.prompts import append_order1_persistence_prompt, apply_domain_notes, build_rank_prompt, controlled_prompt
+from bt4rec.ranking.prompts import append_order1_persistence_prompt, build_rank_prompt, controlled_prompt
 
 
 def requested_modes(raw: str) -> List[str]:
@@ -17,11 +17,6 @@ def requested_modes(raw: str) -> List[str]:
 
 
 def mode_prompt(mode: str, item: Dict[str, Any]):
-    """Prompt for one mode; optional domain notes are added identically to every mode."""
-    return apply_domain_notes(_mode_prompt(mode, item), item.get('domain_prompt'))
-
-
-def _mode_prompt(mode: str, item: Dict[str, Any]):
     h,c,latest = item['history_items'],item['candidate_items'],item['latest_behavior']
     if mode == 'tree_original':
         # Byte-for-byte same user-side Tree prompt as original inference_bt4rec.
