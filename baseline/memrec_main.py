@@ -68,8 +68,7 @@ def parse_args():
     a.train_users_file = a.train_users_file or cfg["train_users"]
     a.eval_users_file = a.eval_users_file or cfg["eval_users"]
     a.candidate_file = a.candidate_file or cfg["candidate_file"]
-    tag = "memrec" if a.warmup_rounds == 1 else f"memrec_w{a.warmup_rounds}"
-    a.output_dir = a.output_dir or str(Path("results/baselines") / a.dataset / tag)
+    a.output_dir = a.output_dir or str(Path("results/baselines") / a.dataset / "memrec")
     return a
 
 
@@ -112,35 +111,7 @@ def main():
     trainer = MemRecTrainer(None, ds, config, torch.device("cuda" if torch.cuda.is_available() else "cpu"))
     trainer.train(save_dir=str(out))
     trainer.test()
-    report = cost_report(out / "cost_summary.json", a)
-    (out / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-    print("\n[REPORT] " + json.dumps(report, indent=2))
     print(f"Saved to {out}")
-
-
-def cost_report(path, a):
-    """Headline numbers for the paper: totals over warm-up (offline) + test (online)."""
-    c = json.loads(Path(path).read_text(encoding="utf-8"))
-    on, off, mem = c["online"], c["offline"], c.get("memory", {})
-    kinds = mem.get("memory_kinds", {})
-    n = max(1, c.get("num_eval_users", 1))
-    tot_calls = on["llm_calls_total"] + off["llm_calls_total"]
-    tot_in = on["input_tokens_total"] + off["input_tokens_total"]
-    tot_out = on["output_tokens_total"] + off["output_tokens_total"]
-    return {
-        "dataset": a.dataset, "warmup_rounds": a.warmup_rounds, "eval_users": c.get("num_eval_users"),
-        "llm_calls_total": tot_calls,
-        "llm_calls_warmup": off["llm_calls_total"], "llm_calls_test": on["llm_calls_total"],
-        "llm_calls_per_user": tot_calls / n,
-        "tokens_total": tot_in + tot_out, "input_tokens_total": tot_in, "output_tokens_total": tot_out,
-        "tokens_per_user": (tot_in + tot_out) / n,
-        "memories_total": mem.get("memories_created_total"),
-        "user_profile_memories": kinds.get("user_profile_memories"),
-        "item_memories_rewritten": kinds.get("item_memories_rewritten"),
-        "stage_w_writes": kinds.get("stage_w_writes"),
-        "calls_by_stage_warmup": {k: v["calls"] for k, v in off.get("by_stage", {}).items()},
-        "calls_by_stage_test": {k: v["calls"] for k, v in on.get("by_stage", {}).items()},
-    }
 
 
 if __name__ == "__main__":
