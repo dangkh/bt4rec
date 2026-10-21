@@ -215,12 +215,10 @@ def dual_schema_stats(
         m["direction"] for m in memories
     )
 
-    # direction is not produced by oracle-aligned prompts (always "unknown"),
-    # so only mechanism/scope decide whether a profile is unknown.
     unknown_profile_count = sum(
         1
         for m in memories
-        if "unknown" in behavior_bucket_key(m)[:2]
+        if "unknown" in behavior_bucket_key(m)
     )
 
     return {

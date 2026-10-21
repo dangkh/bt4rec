@@ -273,7 +273,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--embedding-model", default=None)
     p.add_argument("--embedding-device", choices=["auto", "cpu", "cuda"], default="auto")
     p.add_argument("--embedding-batch-size", type=int, default=128)
-    p.add_argument("--cluster-text-field", choices=["structured_combined", "how3", "trajectory_signature", "behavior_signature"], default=None)
+    p.add_argument("--cluster-text-field", choices=["structured_combined", "trajectory_signature", "behavior_signature"], default=None)
     p.add_argument("--mapping-min-similarity", type=float, default=None)
     p.add_argument("--mapping-min-margin", type=float, default=None)
     p.add_argument("--respect-mapping-filter", action=argparse.BooleanOptionalAction, default=True)
