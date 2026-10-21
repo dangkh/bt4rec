@@ -61,9 +61,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--test-output", help="Optional output override (default: <output-dir>/test_shared.jsonl)")
     p.add_argument("--history-size", type=int, default=20, help="0 = unlimited; cap raw items BEFORE metadata filtering")
     p.add_argument("--window-size", type=int, default=3)
-    p.add_argument("--behavior-domain", choices=["generic", "books", "books_v2"], default="generic",
-                   help="gemma only: books = book prompt v1 (*_books_v1); books_v2 = v1 + strict "
-                        "series/collection and deepening rules (*_books_v2). "
+    p.add_argument("--behavior-domain", choices=["generic", "books"], default="generic",
+                   help="gemma only: books = book-specific extraction prompt (prompt version *_books_v1). "
                         "Use a NEW --output-dir; Tree and inference must use the same variant.")
     p.add_argument("--recent-behaviors", type=int, default=5)
     p.add_argument("--plan-only", action="store_true", help="Audit input and cache reuse; no LLM/GPU needed")
