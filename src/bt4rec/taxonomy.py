@@ -162,6 +162,14 @@ def choose_cluster_text(row: Dict[str, Any], field: str) -> str:
     p = behavior_profile(row)
     if field in {"trajectory_signature", "behavior_signature"}:
         text = signature
+    elif field == "how3":
+        # mechanism + scope + trajectory only (no direction): the same three HOW
+        # fields as the oracle and as the HOW block shown to the ranker.
+        text = (
+            f"mechanism={p['mechanism']}; "
+            f"scope={p['scope']}; "
+            f"trajectory={signature}"
+        )
     elif field == "structured_combined":
         text = (
             f"mechanism={p['mechanism']}; "

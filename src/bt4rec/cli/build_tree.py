@@ -108,6 +108,7 @@ def parse_args() -> argparse.Namespace:
         "--cluster-text-field",
         choices=[
             "structured_combined",
+            "how3",
             "trajectory_signature",
             "behavior_signature",
         ],
