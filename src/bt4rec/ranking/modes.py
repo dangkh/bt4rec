@@ -40,6 +40,9 @@ def mode_prompt(mode: str, item: Dict[str, Any]):
     if mode == 'random_only':
         # Random source HOW only: no latest observed behavior (WHAT) of the target user.
         return controlled_prompt(h,c,None,item['hows']['random_how'])
+    if mode == 'latest_how_only':
+        # Latest observed HOW of the target user only: no latest WHAT (section 2 'Not provided.').
+        return controlled_prompt(h,c,None,item['hows']['latest_how'])
     if mode == 'native':
         return build_rank_prompt(history_items=h, candidate_items=c,
                                  latest_behavior=None, predicted_transition=None)

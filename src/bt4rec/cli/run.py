@@ -127,7 +127,7 @@ from bt4rec.inference.audit import (
     manifest_checkpoint,
     validate_tree_provenance,
 )
-from bt4rec.inference.constants import RANDOM_SOURCE_MODES, RANK_PROMPT_VERSION, SCHEMA_VERSION, STAY_MODES, STAY_PROMPT_VERSIONS
+from bt4rec.inference.constants import LATEST_HOW_MODES, RANDOM_SOURCE_MODES, RANK_PROMPT_VERSION, SCHEMA_VERSION, STAY_MODES, STAY_PROMPT_VERSIONS
 from bt4rec.inference.inputs import resolve_inputs, resolve_source_files
 from bt4rec.llm.encoder import QwenEncoder
 from bt4rec.llm.ranker import LocalQwenRanker, build_ranker
@@ -423,7 +423,8 @@ def main():
             cmeta=[get_item_info(x,items) for x in cand_ids]
             hows={}
             metadata={}
-            if 'latest_how' in modes:
+            if LATEST_HOW_MODES & set(modes):
+                # latest_how_only reuses this exact HOW without the latest WHAT.
                 hows['latest_how']=how_only(test_cache[uid]['generated_behaviors'][-1])
             if need_random:
                 # random_only reuses this exact sample (same seed/uid) without latest WHAT.
