@@ -53,7 +53,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--history-size", type=int, default=None, help="default from configs (20; ML 30)")
     p.add_argument("--max-users", type=int, default=0, help="smoke test cap; 0 = all eval users")
     p.add_argument("--candidate-size", type=int, default=20)
-    p.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct")
+    p.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct",
+                   help="local Qwen (default) or Gemma-3 id; with --ranker openai e.g. gpt-4o-mini")
+    p.add_argument("--ranker", choices=["local", "openai"], default="local")
+    p.add_argument("--api-workers", type=int, default=8)
+    p.add_argument("--api-base", default=None)
+    p.add_argument("--api-cache", default=None, help="default <output-dir>/openai_cache.jsonl")
     p.add_argument("--max-seq-length", type=int, default=8192)
     p.add_argument("--load-in-4bit", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--rank-max-new-tokens", type=int, default=1024)
@@ -72,7 +77,11 @@ def parse_args() -> argparse.Namespace:
     a.user_ids_file = a.user_ids_file or cfg["eval_users"]
     a.candidate_file = a.candidate_file or cfg["candidate_file"]
     a.history_size = a.history_size or int(cfg["history_size"])
-    a.output_dir = a.output_dir or str(Path("results/baselines") / ds / "native")
+    suffix = ""
+    if not (a.ranker == "local" and a.model == "Qwen/Qwen2.5-7B-Instruct"):
+        import re
+        suffix = "_" + re.sub(r"[^A-Za-z0-9.]+", "-", a.model.split("/")[-1]).strip("-")
+    a.output_dir = a.output_dir or str(Path("results/baselines") / ds / f"native{suffix}")
     return a
 
 
@@ -106,11 +115,11 @@ def main() -> None:
         print(f"[PROMPTS-ONLY] {out / 'prompt_example.txt'}")
         return
 
-    from bt4rec.llm.ranker import LocalQwenRanker
+    from bt4rec.llm.ranker import build_ranker
 
-    ranker = LocalQwenRanker(a.model, a.max_seq_length, a.load_in_4bit,
-                             a.rank_max_new_tokens, a.temperature, a.seed)
-    results = ranker.rank_jobs(jobs, batch_size=a.llm_batch_size, call_type="native", max_retries=0)
+    ranker = build_ranker(a, cache_dir=out)
+    bs = a.llm_batch_size if a.ranker == "local" else max(a.llm_batch_size, 4 * a.api_workers)
+    results = ranker.rank_jobs(jobs, batch_size=bs, call_type="native", max_retries=0)
 
     path = out / "native_rankings.jsonl"
     if path.exists():

@@ -86,6 +86,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import re
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -129,7 +130,7 @@ from bt4rec.inference.audit import (
 from bt4rec.inference.constants import RANDOM_SOURCE_MODES, RANK_PROMPT_VERSION, SCHEMA_VERSION, STAY_MODES, STAY_PROMPT_VERSIONS
 from bt4rec.inference.inputs import resolve_inputs, resolve_source_files
 from bt4rec.llm.encoder import QwenEncoder
-from bt4rec.llm.ranker import LocalQwenRanker
+from bt4rec.llm.ranker import LocalQwenRanker, build_ranker
 from bt4rec.ranking.modes import mode_prompt, requested_modes
 from bt4rec.tree.query import ReverseBehaviorTree, latest_accepted_state_suffix
 from bt4rec.tree.vocab import ClusterStateVocabulary
@@ -230,7 +231,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mapping-min-similarity", type=float, default=None)
     p.add_argument("--mapping-min-margin", type=float, default=None)
     p.add_argument("--respect-mapping-filter", action=argparse.BooleanOptionalAction, default=True)
-    p.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct")
+    p.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct",
+                   help="ranking LLM. local: Qwen/Qwen2.5-7B-Instruct (default) or a Gemma-3 id, e.g. "
+                        "unsloth/gemma-3-4b-it-unsloth-bnb-4bit (auto-detected); openai: gpt-4o-mini")
+    p.add_argument("--ranker", choices=["local", "openai"], default="local",
+                   help="local = Unsloth (Qwen/Gemma); openai = OpenAI chat API (OPENAI_API_KEY from env)")
+    p.add_argument("--api-workers", type=int, default=8, help="parallel API requests (--ranker openai)")
+    p.add_argument("--api-base", default=None, help="optional OpenAI-compatible base URL")
+    p.add_argument("--api-cache", default=None, help="response cache jsonl; default <run_dir>/openai_cache.jsonl")
     p.add_argument("--max-seq-length", type=int, default=8192)
     p.add_argument("--load-in-4bit", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--rank-max-new-tokens", type=int, default=1024)
@@ -346,7 +354,9 @@ def main():
 
     stamp=datetime.now(ZoneInfo('Australia/Sydney')).strftime('%Y%m%d_%H%M%S')
     order_tag = 'fulltree' if a.tree_max_query_order==0 else f'order{a.tree_max_query_order}'
-    run_dir=Path(a.run_dir) if a.run_dir else Path(a.output_root)/(f'{a.dataset}_{len(users)}_{a.history_size}_{order_tag}_ablation_{stamp}')
+    model_tag = '' if (a.ranker=='local' and a.model=='Qwen/Qwen2.5-7B-Instruct') else \
+        '_' + re.sub(r'[^A-Za-z0-9.]+','-',a.model.split('/')[-1]).strip('-')
+    run_dir=Path(a.run_dir) if a.run_dir else Path(a.output_root)/(f'{a.dataset}_{len(users)}_{a.history_size}_{order_tag}{model_tag}_ablation_{stamp}')
     if a.resume and not a.run_dir:
         raise ValueError('--resume requires --run-dir')
     if run_dir.exists() and not a.resume:
@@ -483,14 +493,19 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    ranker=LocalQwenRanker(a.model,a.max_seq_length,a.load_in_4bit,
-                           a.rank_max_new_tokens,a.temperature,a.seed)
+    if a.ranker=='openai':
+        ranker=build_ranker(a, cache_dir=run_dir)
+    else:  # local Qwen (default) or Gemma-3 (auto-detected from --model)
+        ranker=LocalQwenRanker(a.model,a.max_seq_length,a.load_in_4bit,
+                               a.rank_max_new_tokens,a.temperature,a.seed)
+    # API: one chunk = several parallel requests (results are per-prompt, order preserved).
+    rank_bs = a.llm_batch_size if a.ranker=='local' else max(a.llm_batch_size, 4*a.api_workers)
     ranked_by_mode={}
     for mode in modes:
-        print(f'[RANK] {mode}: {len(prepared)} users; batch={a.llm_batch_size}',flush=True)
+        print(f'[RANK] {mode}: {len(prepared)} users; batch={rank_bs}; ranker={a.ranker}:{a.model}',flush=True)
         jobs=[{'prebuilt_prompt':rec['prompts'][mode],'candidate_items':rec['candidate_items']}
               for rec in prepared]
-        ranked_by_mode[mode]=ranker.rank_jobs(jobs,batch_size=a.llm_batch_size,
+        ranked_by_mode[mode]=ranker.rank_jobs(jobs,batch_size=rank_bs,
                                               call_type=mode,max_retries=0)
     for i,rec in enumerate(tqdm(prepared,desc='Save ablation rankings',unit='user')):
         ranks={}

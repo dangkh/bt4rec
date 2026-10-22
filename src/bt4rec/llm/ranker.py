@@ -49,22 +49,37 @@ class LocalQwenRanker:
             flush=True,
         )
         print(
-            "[INFO] Loading Qwen model weights/tokenizer; "
+            "[INFO] Loading ranking model weights/tokenizer; "
             "ranking starts immediately after this step.",
             flush=True,
         )
 
-        self.model, self.tokenizer = (
-            FastLanguageModel.from_pretrained(
+        from bt4rec.llm.openai_chat import gemma_stop_ids, is_gemma
+        self.model_name = model_name
+        self.is_gemma = is_gemma(model_name)
+        if self.is_gemma:
+            # Gemma-3 (e.g. unsloth/gemma-3-4b-it-unsloth-bnb-4bit): same loader/template as
+            # the behaviour extractor (bt4rec.behavior.gemma).
+            from unsloth import FastModel
+            self.model, self.tokenizer = FastModel.from_pretrained(
                 model_name=model_name,
                 max_seq_length=max_seq_length,
                 load_in_4bit=load_in_4bit,
+                full_finetuning=False,
             )
-        )
-        self.tokenizer = get_chat_template(
-            self.tokenizer,
-            chat_template="qwen-2.5",
-        )
+            self.tokenizer = get_chat_template(self.tokenizer, chat_template="gemma3")
+        else:
+            self.model, self.tokenizer = (
+                FastLanguageModel.from_pretrained(
+                    model_name=model_name,
+                    max_seq_length=max_seq_length,
+                    load_in_4bit=load_in_4bit,
+                )
+            )
+            self.tokenizer = get_chat_template(
+                self.tokenizer,
+                chat_template="qwen-2.5",
+            )
         self.tokenizer.padding_side = (
             "left"
         )
@@ -76,15 +91,23 @@ class LocalQwenRanker:
             self.tokenizer.pad_token_id = (
                 self.tokenizer.eos_token_id
             )
+        self.stop_ids = gemma_stop_ids(self.tokenizer) if self.is_gemma else [self.tokenizer.eos_token_id]
 
-        FastLanguageModel.for_inference(self.model)
+        if self.is_gemma:
+            try:
+                from unsloth import FastModel
+                FastModel.for_inference(self.model)
+            except Exception:
+                pass
+        else:
+            FastLanguageModel.for_inference(self.model)
         self.model.eval()
         self.device = next(
             self.model.parameters()
         ).device
 
         print(
-            f"[INFO] Qwen loaded on {self.device}. "
+            f"[INFO] Ranker loaded on {self.device}. "
             "Starting ranking batches.",
             flush=True,
         )
@@ -134,7 +157,9 @@ class LocalQwenRanker:
             )
         )
 
-        if text.startswith("<bos>"):
+        # Tokenization below uses add_special_tokens=False, so Gemma's <bos> must stay
+        # in the rendered text (Qwen has no <bos>; legacy behaviour unchanged).
+        if text.startswith("<bos>") and not getattr(self, "is_gemma", False):
             text = text[len("<bos>"):]
 
         return text
@@ -175,6 +200,8 @@ class LocalQwenRanker:
             ),
             "eos_token_id": (
                 self.tokenizer.eos_token_id
+                if not getattr(self, "is_gemma", False)
+                else self.stop_ids
             ),
         }
 
@@ -232,11 +259,12 @@ class LocalQwenRanker:
         # Exact per-sample counts: real prompt tokens (no left padding) and
         # generated tokens up to and including EOS. Used for cost reporting.
         prompt_tokens = [int(x) for x in batch["attention_mask"].sum(dim=1).tolist()]
-        eos_id = self.tokenizer.eos_token_id
+        stops = [x for x in getattr(self, "stop_ids", [self.tokenizer.eos_token_id]) if x is not None]
         self._last_token_counts = []
         for gen_row, n_in in zip(generated, prompt_tokens):
             toks = [int(t) for t in gen_row.tolist()]
-            n_out = toks.index(eos_id) + 1 if eos_id is not None and eos_id in toks else len(toks)
+            hits = [i for i, t in enumerate(toks) if t in stops]
+            n_out = hits[0] + 1 if hits else len(toks)
             self._last_token_counts.append((n_in, n_out))
             self.calls.append(
                 CallStat(
@@ -481,12 +509,14 @@ class LocalQwenRanker:
 
         return {
             "model": str(
-                getattr(
+                getattr(self, "model_name", None)
+                or getattr(
                     self.model,
                     "name_or_path",
                     "local_qwen",
                 )
             ),
+            "backend": getattr(self, "backend", "local"),
             "generation_records": len(
                 self.calls
             ),
@@ -513,3 +543,60 @@ class LocalQwenRanker:
                 by_type
             ),
         }
+
+
+RANK_SYSTEM_PROMPT = (
+    "You are a recommendation ranking system. "
+    "Return only the requested candidate-label ranking."
+)
+
+
+class OpenAIRanker(LocalQwenRanker):
+    """Same prompts, system prompt, parser and repair policy as LocalQwenRanker, but the
+    generation is done by the OpenAI chat API (e.g. gpt-4o-mini). Token counts = API usage."""
+
+    def __init__(self, model_name: str = "gpt-4o-mini", rank_max_new_tokens: int = 1024,
+                 temperature: float = 0.0, seed: int = 42, *, workers: int = 8,
+                 api_base: Optional[str] = None, cache_path: Optional[str] = None) -> None:
+        from bt4rec.llm.openai_chat import OpenAIChat
+        self.backend = "openai"
+        self.model_name = model_name
+        self.is_gemma = False
+        self.rank_max_new_tokens = int(rank_max_new_tokens)
+        self.temperature = float(temperature)
+        self.calls: List[CallStat] = []
+        self.client = OpenAIChat(model_name, temperature=temperature, seed=seed, workers=workers,
+                                 api_base=api_base, cache_path=cache_path)
+
+    def _generate_batch_raw(self, prompts: List[str], call_type: str) -> List[str]:
+        if not prompts:
+            return []
+        res = self.client.generate(prompts, RANK_SYSTEM_PROMPT, self.rank_max_new_tokens)
+        self._last_token_counts = []
+        for r in res:
+            n_in, n_out = int(r["input_tokens"]), int(r["output_tokens"])
+            self._last_token_counts.append((n_in, n_out))
+            self.calls.append(CallStat(call_type=call_type, input_tokens=n_in, output_tokens=n_out,
+                                       elapsed_sec=float(r.get("elapsed_sec", 0.0)),
+                                       parse_ok=False, complete_ranking=False))
+        return [str(r["text"]).strip() for r in res]
+
+    def stats(self) -> Dict[str, Any]:
+        out = super().stats() if self.calls else {"model": self.model_name, "generation_records": 0}
+        out["token_count_method"] = "OpenAI API usage (prompt_tokens / completion_tokens)"
+        out.update(self.client.stats())
+        return out
+
+
+def build_ranker(a, cache_dir=None):
+    """--ranker local (Qwen or Gemma, inferred from --model) | openai."""
+    if getattr(a, "ranker", "local") == "openai":
+        cache = getattr(a, "api_cache", None)
+        if not cache and cache_dir is not None:
+            from pathlib import Path
+            cache = str(Path(cache_dir) / "openai_cache.jsonl")
+        return OpenAIRanker(a.model, a.rank_max_new_tokens, a.temperature, a.seed,
+                            workers=getattr(a, "api_workers", 8), api_base=getattr(a, "api_base", None),
+                            cache_path=cache)
+    return LocalQwenRanker(a.model, a.max_seq_length, a.load_in_4bit,
+                           a.rank_max_new_tokens, a.temperature, a.seed)
