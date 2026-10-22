@@ -230,7 +230,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cluster-text-field", choices=["structured_combined", "trajectory_signature", "behavior_signature"], default=None)
     p.add_argument("--mapping-min-similarity", type=float, default=None)
     p.add_argument("--mapping-min-margin", type=float, default=None)
-    p.add_argument("--respect-mapping-filter", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--respect-mapping-filter", action=argparse.BooleanOptionalAction, default=None,
+                   help="Apply the similarity/margin confidence filter when mapping test behaviors to "
+                        "states. Default: follow the Tree (ON, unless it was built with "
+                        "--keep-ambiguous-assignments, i.e. the no-confidence-filter ablation).")
     p.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct",
                    help="ranking LLM. local: Qwen/Qwen2.5-7B-Instruct (default) or a Gemma-3 id, e.g. "
                         "unsloth/gemma-3-4b-it-unsloth-bnb-4bit (auto-detected); openai: gpt-4o-mini")
@@ -302,6 +305,13 @@ def parse_args() -> argparse.Namespace:
 
 def main():
     a = resolve_inputs(parse_args())
+    if a.respect_mapping_filter is None:
+        # Follow the Tree: a Tree built without the confidence filter
+        # (--keep-ambiguous-assignments) is also queried without it.
+        aq = (load_json(a.states_json).get('metadata', {}).get('cluster_quality', {})
+              .get('assignment_quality', {}))
+        a.respect_mapping_filter = not bool(aq.get('keep_ambiguous_assignments', False))
+        print(f'[INFO] respect_mapping_filter={a.respect_mapping_filter} (from Tree metadata)', flush=True)
     modes = requested_modes(a.modes)
     set_seed(a.seed)
     resolve_source_files(a,modes)
@@ -413,7 +423,7 @@ def main():
                                                 collapse_consecutive=tree.collapse_consecutive_states)
             tr=tree.query(suffix,top_next=a.top_next,max_query_order=a.tree_max_query_order)
             predicted=tr.get('predicted_next_states',[])
-            if not predicted and any(m in modes for m in ('tree','tree_original','recent3_tree',
+            if not predicted and any(m in modes for m in ('tree','tree_how_only','tree_original','recent3_tree',
                                                      'tree_stay','tree_original_stay','recent3_tree_stay')):
                 raise ValueError(f'{uid}: Tree query yielded no continuation')
             cand_ids,targets=get_candidates_for_user(uid,seq,{},frozen,a.seed)
@@ -432,7 +442,7 @@ def main():
             if 'global_continuation' in modes:
                 hows['global_continuation']=global_how
                 metadata['global_continuation']=global_audit
-            if any(m in modes for m in ('tree','recent3_tree','tree_stay','recent3_tree_stay')):
+            if any(m in modes for m in ('tree','tree_how_only','recent3_tree','tree_stay','recent3_tree_stay')):
                 hows['tree']=how_only(predicted[0])
                 metadata['tree']={'state_id':predicted[0]['state_id'],
                                   'probability':predicted[0].get('probability'),

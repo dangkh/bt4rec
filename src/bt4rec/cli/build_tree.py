@@ -180,7 +180,8 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
-        "--keep-ambiguous-assignments",
+        "--keep-ambiguous-assignments", "--no-confidence-filter",
+        dest="keep_ambiguous_assignments",
         action="store_true",
         help=(
             "Diagnostic override: keep low-confidence assignments in tree "

@@ -40,6 +40,9 @@ def mode_prompt(mode: str, item: Dict[str, Any]):
     if mode == 'random_only':
         # Random source HOW only: no latest observed behavior (WHAT) of the target user.
         return controlled_prompt(h,c,None,item['hows']['random_how'])
+    if mode == 'tree_how_only':
+        # Tree-predicted HOW only: no latest WHAT of the target user (section 2 'Not provided.').
+        return controlled_prompt(h,c,None,item['hows']['tree'])
     if mode == 'latest_how_only':
         # Latest observed HOW of the target user only: no latest WHAT (section 2 'Not provided.').
         return controlled_prompt(h,c,None,item['hows']['latest_how'])

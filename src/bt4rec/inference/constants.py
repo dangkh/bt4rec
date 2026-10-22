@@ -9,7 +9,7 @@ RANK_PROMPT_VERSION = "bt4rec_controlled_additional_how_list_v1"
 
 AB_MODES = (
     'latest_only', 'latest_how', 'latest_how_only', 'random_how', 'random_only', 'global_continuation',
-    'pmn', 'tree', 'oracle', 'recent3', 'recent3_tree',
+    'pmn', 'tree', 'tree_how_only', 'oracle', 'recent3', 'recent3_tree',
     'tree_original', 'native',
     'stay_only', 'tree_stay', 'tree_original_stay', 'recent3_tree_stay',
 )
