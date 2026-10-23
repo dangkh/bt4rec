@@ -137,9 +137,11 @@ class LocalQwenRanker:
         messages = [
             {
                 "role": "system",
-                "content": (
+                "content": getattr(
+                    self,
+                    "system_prompt",
                     "You are a recommendation ranking system. "
-                    "Return only the requested candidate-label ranking."
+                    "Return only the requested candidate-label ranking.",
                 ),
             },
             {
@@ -284,6 +286,19 @@ class LocalQwenRanker:
             for x in raws
         ]
 
+    def set_rank_format(self, rank_format: str = "list") -> None:
+        """list (default): C-label list + list repair. score: i2Agent-style scores
+        (system prompt + parser/repair of baseline/i2agent.py). The prompt itself must
+        already use the matching OUTPUT REQUIREMENTS (bt4rec.ranking.score_format)."""
+        if rank_format not in ("list", "score"):
+            raise ValueError(rank_format)
+        self.rank_format = rank_format
+        if rank_format == "score":
+            from bt4rec.ranking.score_format import SCORE_SYSTEM_PROMPT
+            self.system_prompt = SCORE_SYSTEM_PROMPT
+        else:
+            self.system_prompt = RANK_SYSTEM_PROMPT
+
     def _parse_rank(
         self,
         raw: str,
@@ -292,6 +307,9 @@ class LocalQwenRanker:
         List[str],
         Dict[str, Any],
     ]:
+        if getattr(self, "rank_format", "list") == "score":
+            from bt4rec.ranking.score_format import parse_score_ranking
+            return parse_score_ranking(raw, valid_ids)
         (
             ranking,
             complete,
@@ -571,7 +589,8 @@ class OpenAIRanker(LocalQwenRanker):
     def _generate_batch_raw(self, prompts: List[str], call_type: str) -> List[str]:
         if not prompts:
             return []
-        res = self.client.generate(prompts, RANK_SYSTEM_PROMPT, self.rank_max_new_tokens)
+        res = self.client.generate(prompts, getattr(self, "system_prompt", RANK_SYSTEM_PROMPT),
+                                   self.rank_max_new_tokens)
         self._last_token_counts = []
         for r in res:
             n_in, n_out = int(r["input_tokens"]), int(r["output_tokens"])

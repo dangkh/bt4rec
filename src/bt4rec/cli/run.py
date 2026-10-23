@@ -132,6 +132,7 @@ from bt4rec.inference.inputs import resolve_inputs, resolve_source_files
 from bt4rec.llm.encoder import QwenEncoder
 from bt4rec.llm.ranker import LocalQwenRanker, build_ranker
 from bt4rec.ranking.modes import mode_prompt, requested_modes
+from bt4rec.ranking.score_format import to_score_prompt
 from bt4rec.tree.query import ReverseBehaviorTree, latest_accepted_state_suffix
 from bt4rec.tree.vocab import ClusterStateVocabulary
 
@@ -227,7 +228,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--embedding-model", default=None)
     p.add_argument("--embedding-device", choices=["auto", "cpu", "cuda"], default="auto")
     p.add_argument("--embedding-batch-size", type=int, default=128)
-    p.add_argument("--cluster-text-field", choices=["structured_combined", "trajectory_signature", "behavior_signature"], default=None)
+    p.add_argument("--cluster-text-field", choices=["structured_combined", "how3", "trajectory_signature", "behavior_signature"], default=None)
     p.add_argument("--mapping-min-similarity", type=float, default=None)
     p.add_argument("--mapping-min-margin", type=float, default=None)
     p.add_argument("--respect-mapping-filter", action=argparse.BooleanOptionalAction, default=None,
@@ -239,6 +240,11 @@ def parse_args() -> argparse.Namespace:
                         "unsloth/gemma-3-4b-it-unsloth-bnb-4bit (auto-detected); openai: gpt-4o-mini")
     p.add_argument("--ranker", choices=["local", "openai"], default="local",
                    help="local = Unsloth (Qwen/Gemma); openai = OpenAI chat API (OPENAI_API_KEY from env)")
+    p.add_argument("--rank-format", choices=["list", "score"], default="list",
+                   help="list (default): C-label ranking list + list repair. score: i2Agent-style output "
+                        "({\"scores\": {C01: 0.92, ...}}) with i2Agent's system prompt, parser and repair "
+                        "(lenient labels, sort by score, ties/missing in frozen order). Evidence sections "
+                        "of the prompt are unchanged; works with --ranker local and openai.")
     p.add_argument("--api-workers", type=int, default=8, help="parallel API requests (--ranker openai)")
     p.add_argument("--api-base", default=None, help="optional OpenAI-compatible base URL")
     p.add_argument("--api-cache", default=None, help="response cache jsonl; default <run_dir>/openai_cache.jsonl")
@@ -366,6 +372,8 @@ def main():
     order_tag = 'fulltree' if a.tree_max_query_order==0 else f'order{a.tree_max_query_order}'
     model_tag = '' if (a.ranker=='local' and a.model=='Qwen/Qwen2.5-7B-Instruct') else \
         '_' + re.sub(r'[^A-Za-z0-9.]+','-',a.model.split('/')[-1]).strip('-')
+    if a.rank_format=='score':
+        model_tag += '_score'
     run_dir=Path(a.run_dir) if a.run_dir else Path(a.output_root)/(f'{a.dataset}_{len(users)}_{a.history_size}_{order_tag}{model_tag}_ablation_{stamp}')
     if a.resume and not a.run_dir:
         raise ValueError('--resume requires --run-dir')
@@ -473,6 +481,8 @@ def main():
                  'predicted_transition':predicted, 'last_state_persistence':stay,
                  'stay_prompt':a.stay_prompt, 'latest_how':latest_how}
             rec['prompts']={m:mode_prompt(m,rec) for m in modes}
+            if a.rank_format=='score':
+                rec['prompts']={m:to_score_prompt(pr,len(cmeta)) for m,pr in rec['prompts'].items()}
             prepared.append(rec)
         # All prompts generated BEFORE any ranker inference. Their modalities are inspectable.
         selected=next((x for x in prepared if x['user_id']==a.prompt_example_user),prepared[0])
@@ -509,6 +519,8 @@ def main():
     else:  # local Qwen (default) or Gemma-3 (auto-detected from --model)
         ranker=LocalQwenRanker(a.model,a.max_seq_length,a.load_in_4bit,
                                a.rank_max_new_tokens,a.temperature,a.seed)
+    if a.rank_format!='list':
+        ranker.set_rank_format(a.rank_format)
     # API: one chunk = several parallel requests (results are per-prompt, order preserved).
     rank_bs = a.llm_batch_size if a.ranker=='local' else max(a.llm_batch_size, 4*a.api_workers)
     ranked_by_mode={}
