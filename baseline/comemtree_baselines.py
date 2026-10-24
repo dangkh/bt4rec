@@ -146,6 +146,7 @@ class Data:
             self.train_user_source = "all users in " + args.sequences
         self.train: Dict[str, List[str]] = {}
         ignored_val = 0
+        self.users_with_val = 0
         for uid, rec in raw.items():
             uid = str(uid)
             if allowed is not None and uid not in allowed:
@@ -153,12 +154,18 @@ class Data:
             if not isinstance(rec, dict):
                 raise ValueError(f"user {uid}: expected a dict with train/test")
             tr = as_str_list(rec.get("train"))  # full TRAIN history ...
+            val = [i for k in ("val", "valid", "validation") for i in as_str_list(rec.get(k))]
+            self.users_with_val += bool(val)
+            if args.history == "train_val":
+                tr = tr + val                       # every observed event before the test target
+            else:
+                ignored_val += len(val)
             if args.max_history > 0:
                 tr = tr[-args.max_history:]       # ... or only the last --max-history items
-            ignored_val += sum(len(as_str_list(rec.get(k))) for k in ("val", "valid", "validation"))
             if tr:
                 self.train[uid] = tr
         self.ignored_validation_items = ignored_val
+        self.history = args.history
         self.max_history = int(args.max_history)
         self.users: List[str] = sorted(self.train)
         self.user_index = {u: i for i, u in enumerate(self.users)}
@@ -228,6 +235,8 @@ class Data:
             "train_length_mean": float(np.mean(lens)),
             "train_length_median": float(np.median(lens)),
             "train_length_max": int(max(lens)),
+            "history_source": self.history,
+            "users_with_val_items_in_source": self.users_with_val,
             "ignored_validation_items_in_source": self.ignored_validation_items,
             "n_eval_users": len(self.eval_users),
             "eval_users_are_part_of_training": True,
@@ -716,6 +725,9 @@ def parse_args() -> argparse.Namespace:
                         "(default data/<dataset>/protocol/train_users_1000.json; eval users always included)")
     p.add_argument("--train-all-users", action="store_true",
                    help="train on every user in --sequences instead of --train-users-file")
+    p.add_argument("--history", choices=["train", "train_val"], default="train",
+                   help="train (default, same as CoMemTree): the TRAIN list only. train_val: TRAIN + the "
+                        "legacy val item(s), i.e. every observed event before the test target")
     p.add_argument("--max-history", type=int, default=0,
                    help="keep only the last N TRAIN items per user for training AND scoring "
                         "(Pop/LightGCN/SASRec); 0 = full history")
@@ -757,6 +769,8 @@ def parse_args() -> argparse.Namespace:
     else:
         a.train_users_file = a.train_users_file or str(root / "protocol" / "train_users_1000.json")
     tag = "all_users" if a.train_users_file is None else Path(a.train_users_file).stem
+    if a.history == "train_val":
+        tag += "_trainval"
     if a.max_history > 0:
         tag += f"_h{a.max_history}"
     a.output_dir = a.output_dir or f"results/baselines/{a.dataset}/{tag}"
@@ -797,7 +811,7 @@ def main() -> None:
         res.update({"dataset": a.dataset, "data_stats": stats, "runtime_sec": round(time.time() - t, 1),
                     "train_users": data.train_user_source,
                     "protocol": (f"last {a.max_history} train items per user" if a.max_history > 0
-                                 else "full train histories (no truncation)")
+                                 else f"full {a.history} histories (no truncation)")
                                 + ", penultimate-item early stopping, "
                                 "frozen eval users + 20 frozen candidates"})
         save_json(out_dir / f"{m}_metrics.json", res)
