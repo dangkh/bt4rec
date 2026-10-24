@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from bt4rec.inference.constants import AB_MODES
-from bt4rec.ranking.prompts import build_rank_prompt, controlled_prompt
+from bt4rec.ranking.prompts import build_native_prompt, controlled_prompt
 
 
 def requested_modes(raw: str) -> List[str]:
@@ -20,10 +20,11 @@ def mode_prompt(mode: str, item: Dict[str, Any]) -> str:
     """Filled-in ranking prompt of one condition (see bt4rec.inference.constants)."""
     h, c, latest, hows = item['history_items'], item['candidate_items'], item['latest_behavior'], item['hows']
     if mode == 'native':
-        return build_rank_prompt(history_items=h, candidate_items=c,
-                                 latest_behavior=None, predicted_transition=None)
+        # Plain ranking prompt: no CoMemTree WHAT/HOW sections or rules.
+        return build_native_prompt(history_items=h, candidate_items=c)
     if mode == 'latest_what_only':
-        return controlled_prompt(h, c, latest, None)
+        # Native prompt + a short summary of the latest window (WHAT).
+        return build_native_prompt(history_items=h, candidate_items=c, latest_behavior=latest)
     if mode == 'latest_how_only':
         return controlled_prompt(h, c, None, hows['latest_how'])
     if mode == 'tree':

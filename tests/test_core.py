@@ -196,6 +196,10 @@ class ModePromptTest(unittest.TestCase):
                 self.assertEqual(f"how-{tag}" in p, tag == how, (mode, tag))
             self.assertEqual("RECENT OBSERVED BEHAVIORS" in p, mode == "tree_v2", mode)
             self.assertEqual(p.count("OUTPUT REQUIREMENTS"), 1)
+            # native / latest_what_only use the plain prompt without CoMemTree framing.
+            plain = mode in ("native", "latest_what_only")
+            self.assertEqual("ADDITIONAL BEHAVIOR GUIDANCE" in p or "PREDICTED NEXT TRANSITION" in p, not plain, mode)
+            self.assertEqual("LATEST BEHAVIOR SUMMARY" in p, mode == "latest_what_only", mode)
         with self.assertRaises(ValueError):
             requested_modes("tree,tree_stay")
 

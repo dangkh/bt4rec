@@ -4,7 +4,7 @@ SCHEMA_VERSION = "bt4rec_controlled_behavior_source_ablation_v1"
 RECENT3_PROMPT_VERSION = "recent3_semantic_qwen_clabel_json_list_v1"
 
 
-RANK_PROMPT_VERSION = "bt4rec_controlled_additional_how_list_v1"
+RANK_PROMPT_VERSION = "comemtree_list_v2_plain_native_latest"
 
 
 # Ranking conditions.  Section 2 of the prompt = WHAT (observed semantic behavior),
@@ -12,8 +12,8 @@ RANK_PROMPT_VERSION = "bt4rec_controlled_additional_how_list_v1"
 # history, frozen candidates, output format and parser.
 #
 #   Main comparison
-#     native             no behavior evidence (history + candidates only)
-#     latest_what_only   WHAT of the latest window,            no HOW
+#     native             plain ranking prompt: history + candidates, no WHAT/HOW framing
+#     latest_what_only   native prompt + short summary (WHAT) of the latest window
 #     latest_how_only    no WHAT,                              HOW of the latest window
 #     tree               WHAT of the latest window           + Tree-predicted next HOW   (CoMemTree)
 #     tree_v2            WHAT of the latest 3 windows        + Tree-predicted next HOW   (CoMemTree v2)

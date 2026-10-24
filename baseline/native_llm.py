@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Native LLM baseline = EXACTLY the ``native`` mode of CoMemTree (bt4rec.cli.run).
 
-Same prompt template (``build_rank_prompt`` with no behaviour/HOW block), same system
+Same prompt (``build_native_prompt``: plain ranking prompt, no WHAT/HOW framing), same system
 prompt, same C-label parser/repair policy, same Qwen2.5-7B ranker, same frozen
 history (last 20 TRAIN items; 30 for ML), same 1000 eval users and frozen 20
 candidates. It needs no Tree or behaviour cache, so it can run before anything else
@@ -37,7 +37,7 @@ from bt4rec.data.candidates import get_candidates_for_user, load_candidate_file 
 from bt4rec.data.items import as_str_list, get_item_info, normalize_items  # noqa: E402
 from bt4rec.eval.cost import CostTracker, memory_block  # noqa: E402
 from bt4rec.eval.metrics import aggregate_mode, target_rank  # noqa: E402
-from bt4rec.ranking.prompts import build_rank_prompt  # noqa: E402
+from bt4rec.ranking.prompts import build_native_prompt  # noqa: E402
 
 SCHEMA = "native_comemtree_template_v1"
 
@@ -95,8 +95,7 @@ def main() -> None:
             raise ValueError(f"{uid}: expected {a.candidate_size} candidates and one target")
         hist = [get_item_info(x, items) for x in as_str_list(seqs[uid].get("train"))[-a.history_size:]]
         cmeta = [get_item_info(x, items) for x in cand_ids]
-        prompt = build_rank_prompt(history_items=hist, candidate_items=cmeta,
-                                   latest_behavior=None, predicted_transition=None)
+        prompt = build_native_prompt(history_items=hist, candidate_items=cmeta)
         jobs.append({"user_id": uid, "prebuilt_prompt": prompt, "candidate_items": cmeta,
                      "candidate_ids": cand_ids, "targets": targets, "history_items": hist})
     print(f"[NATIVE] {a.dataset}: users={len(jobs)} history={a.history_size} "

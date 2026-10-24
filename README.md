@@ -60,12 +60,13 @@ python -m bt4rec.cli.run --dataset CDs --modes native,latest_what_only,latest_ho
 
 All conditions share the same history (20 train items; 30 for ML), the same 20 frozen
 candidates, the same output format (a JSON list of candidate labels) and the same parser.
-They differ only in section 2 (WHAT) and section 3 (HOW) of the prompt.
+`native` and `latest_what_only` use a plain ranking prompt; the other conditions use the
+CoMemTree prompt and differ only in section 2 (WHAT) and section 3 (HOW).
 
 | Mode | WHAT | HOW | |
 |---|---|---|---|
-| `native` | – | – | history and candidates only (LLMRank) |
-| `latest_what_only` | latest window | – | reference condition in `summary.json` |
+| `native` | – | – | plain ranking prompt: history and candidates, no WHAT/HOW framing (LLMRank) |
+| `latest_what_only` | latest window | – | native prompt + a short summary of the latest window; reference condition in `summary.json` |
 | `latest_how_only` | – | latest window | |
 | `tree` | latest window | Tree prediction | **CoMemTree** |
 | `tree_v2` | latest 3 windows | Tree prediction | **CoMemTree v2** |

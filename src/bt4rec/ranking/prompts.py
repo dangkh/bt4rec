@@ -159,6 +159,69 @@ Return ALL labels; do not stop after the top few candidates.
 """
 
 
+def _output_requirements(n: int) -> str:
+    """OUTPUT REQUIREMENTS shared by every condition (identical to build_rank_prompt)."""
+    return f"""OUTPUT REQUIREMENTS
+- Rank ALL {n} candidate labels exactly once.
+- Use ONLY C01, C02, ..., C{n:02d}.
+- Do NOT output bare integers such as 1, 2, 3.
+- Do NOT repeat any candidate label.
+- Do NOT omit any candidate label.
+- Return one JSON object with "ranking" and "reasoning" fields.
+- "ranking" must be a list of exactly {n} quoted candidate labels, best first.
+- "reasoning" must be one short sentence (at most 25 words).
+- Do not output item IDs, item titles in the ranking list, code fences or a second answer.
+- Apostrophes do not need escaping in JSON strings.
+Return ALL labels; do not stop after the top few candidates.
+"""
+
+
+def build_native_prompt(
+    *,
+    history_items: List[Dict[str, str]],
+    candidate_items: List[Dict[str, str]],
+    latest_behavior: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Plain LLM ranking prompt (``native``), without any CoMemTree WHAT/HOW framing.
+
+    With ``latest_behavior`` (``latest_what_only``) a short LATEST BEHAVIOR SUMMARY of the
+    user's latest window is added after the history; nothing else changes. History,
+    candidate and output blocks are the same as in the CoMemTree prompt.
+    """
+    n = len(candidate_items)
+    latest_section = ""
+    latest_rule = ""
+    if latest_behavior is not None:
+        summary = json.dumps(
+            {"recommendation_behavior": latest_behavior.get("recommendation_behavior", ""),
+             "semantic_focus": latest_behavior.get("semantic_focus", [])},
+            ensure_ascii=False, indent=2)
+        latest_section = (
+            "LATEST BEHAVIOR SUMMARY\n"
+            "A short summary of the user's most recent interactions.\n"
+            f"{summary}\n\n")
+        latest_rule = "- Use the latest behavior summary as additional evidence of the current preference.\n"
+    return f"""You are ranking candidate items for the user's NEXT choice.
+
+RECENT HISTORY
+This is the user's observed item history (older to newer).
+
+{format_history(history_items)}
+
+{latest_section}CANDIDATE ITEMS
+
+{format_candidates(candidate_items)}
+
+RULES
+- Infer the user's current preference from the evidence above.
+{latest_rule}- Rank candidates by decreasing compatibility with the user's NEXT choice.
+- Candidate input order is RANDOM and has no ranking meaning.
+- CANDIDATE LABELS (C01, C02, ...) are arbitrary handles and carry no preference signal.
+- Base matching only on information actually shown above (titles and categories).
+
+{_output_requirements(n)}"""
+
+
 def build_recent3_rank_prompt(
     *,
     history_items: List[Dict[str, str]],
