@@ -41,17 +41,3 @@ Không cần đặt `PYTHONPATH` (script tự thêm `src/`).
 
 CoMemTree (`python -m bt4rec.cli.run`) giờ cũng ghi `cost_summary.json` trong run dir
 (`by_mode`, `upstream_reused`, `memory`) và token chính xác theo từng user trong `rankings.jsonl`.
-
-## Thay đổi so với các file cũ
-
-- `native_llm_list_score_batch-4.py` dùng prompt riêng cho phim, history dạng JSON, 10 item,
-  300 user, output list/score và fallback toàn bộ khi lỗi parse → **không so sánh được** với các
-  mode CoMemTree. `native_llm.py` thay thế (prompt giống hệt mode `native`, đã kiểm tra trùng từng byte).
-- i2Agent: gộp 2 file thành một (`--variant`); bỏ yêu cầu train/eval disjoint (protocol hiện tại
-  train == eval, memory chỉ dùng TRAIN); history mặc định 20/30; đọc protocol trong `data/<DS>/protocol/`;
-  candidate frozen là chuẩn (không bắt buộc trùng `test_neg`, giống CoMemTree); thêm cost + memory.
-- aMem4Rec build: mặc định đọc `train_shared.jsonl` của CoMemTree, lọc theo `train_users_1000`,
-  embedding chạy trên GPU nếu có; thêm cost (call Gemma gắn theo user kích hoạt, merge là shared).
-- aMem4Rec inference: **sửa lỗi** query không được center trong khi memory đã center (builder mặc
-  định center) → retrieval lệch; dùng đúng eval_users_1000 theo thứ tự (trước lấy theo thứ tự file
-  sequences); không ghi đè/sinh lại file candidate; tính metric (trước không có); thêm cost.
