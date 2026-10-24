@@ -11,7 +11,7 @@ Reads a CoMemTree run (rankings.jsonl from bt4rec.cli.run) and writes a report w
      (category path level 2 / 3, e.g. "Video Games > PlayStation 4 > Accessories").
 
   python scripts/analyze_ranks.py --run-dir results/comemtree/Video_Games_1000_20_fulltree_ablation_XXXX \
-      --dataset Video_Games --modes native,latest_only,tree,tree_stay --ref latest_only
+      --dataset Video_Games --modes native,latest_what_only,tree,tree_v2 --ref latest_what_only
 Output: <run-dir>/rank_analysis.md and rank_analysis.json
 """
 from __future__ import annotations
@@ -64,7 +64,7 @@ def main():
     ap.add_argument("--dataset", default=None, help="for items.json (platform/accessory slices)")
     ap.add_argument("--items", default=None)
     ap.add_argument("--modes", default=None, help="default: all modes in the file")
-    ap.add_argument("--ref", default="latest_only", help="reference mode for gaps / movements")
+    ap.add_argument("--ref", default="latest_what_only", help="reference mode for gaps / movements")
     ap.add_argument("--focus", default="tree", help="mode analysed in the slices")
     a = ap.parse_args()
     run = Path(a.run_dir)

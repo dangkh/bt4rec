@@ -1,19 +1,11 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-from bt4rec.common.io import dump_json, file_sha256, load_json, load_user_ids_file
-from bt4rec.inference.constants import (
-    RANK_PROMPT_VERSION,
-    RECENT3_PROMPT_VERSION,
-    SCHEMA_VERSION,
-    STAY_MODES,
-    STAY_PROMPT_VERSIONS,
-)
-from bt4rec.ranking.prompts import build_rank_prompt, build_recent3_rank_prompt
+from bt4rec.common.io import file_sha256, load_json, load_user_ids_file
+from bt4rec.inference.constants import RANDOM_SOURCE_MODES, RANK_PROMPT_VERSION, SCHEMA_VERSION
 
 
 def validate_tree_provenance(args: argparse.Namespace, cohort: Sequence[str]) -> Dict[str, Any]:
@@ -97,7 +89,7 @@ def audit_profile_source_restrictions(args, users, sequences, modes):
         raise ValueError('Source cohort file empty')
     full_eval = set(load_user_ids_file(args.user_ids_file))
     forbidden = full_eval if args.exclude_all_eval_sources else set()
-    if {'random_how','random_only'} & set(modes) or 'pmn' in modes:
+    if RANDOM_SOURCE_MODES & set(modes) or 'pmn' in modes:
         print('[SOURCE] train_cohort=', len(allowed) if allowed is not None else 'unrestricted',
               ' eval_excluded=',len(forbidden), ' source/eval overlap prohibited self-match always',flush=True)
     return allowed, forbidden
@@ -108,7 +100,7 @@ def manifest_checkpoint(args, modes, users):
         'candidate_file':args.candidate_file, 'behavior_cache':args.precomputed_behaviors,
         'tree_json':args.tree_json, 'states_json':args.states_json,
         'sequences':args.sequences, 'user_ids_file':args.user_ids_file,
-        'train_behaviors':args.train_behaviors if {'random_how','random_only'} & set(modes) else None,
+        'train_behaviors':args.train_behaviors if RANDOM_SOURCE_MODES & set(modes) else None,
         'pmn_summaries':args.pmn_summaries if 'pmn' in modes else None,
         'oracle_behaviors':args.oracle_behaviors if 'oracle' in modes else None,
         'source_user_ids_file':args.source_user_ids_file,
@@ -127,73 +119,8 @@ def manifest_checkpoint(args, modes, users):
             'load_in_4bit':args.load_in_4bit,'strict_cache_history':args.strict_cache_history,
             'exclude_all_eval_sources':args.exclude_all_eval_sources,
             'require_user_disjoint_tree':args.require_user_disjoint_tree,
-            'stay_prompt_version':(STAY_PROMPT_VERSIONS[getattr(args, 'stay_prompt', 'v2')]
-                                   if set(modes) & STAY_MODES else None),
             'files':{k:str(Path(v).resolve()) if v else None for k,v in files.items()},
             'external_file_hashes':{
                 k:file_sha256(files[k]) for k in ('train_behaviors','pmn_summaries',
                     'oracle_behaviors','source_user_ids_file') if files[k] is not None},
             }
-
-
-def filled_prompt_sections(record: Dict[str, Any], run_native: bool, run_latest: bool,
-                            run_recent3: bool = False) -> Dict[str, str]:
-    h, c, latest, trans = (record["history_items"], record["candidate_items"],
-                            record["latest_behavior"], record["predicted_transition"])
-    sections = {"tree": build_rank_prompt(history_items=h, candidate_items=c,
-                                           latest_behavior=latest, predicted_transition=trans)}
-    if run_latest:
-        sections["latest_only"] = build_rank_prompt(history_items=h, candidate_items=c,
-                                                     latest_behavior=latest, predicted_transition=None)
-    if run_native:
-        sections["native"] = build_rank_prompt(history_items=h, candidate_items=c,
-                                               latest_behavior=None, predicted_transition=None)
-    if run_recent3:
-        sections["recent3"] = build_recent3_rank_prompt(
-            history_items=h, candidate_items=c,
-            recent3_behaviors=record["recent3_behaviors"],
-        )
-    return sections
-
-
-def save_prompt_examples(args: argparse.Namespace, prepared: List[Dict[str, Any]], run_dir: Path) -> Dict[str, Any]:
-    if not prepared:
-        raise ValueError("Nothing prepared to save prompts")
-    chosen = prepared[0]
-    if args.prompt_example_user:
-        hits = [r for r in prepared if r["user_id"] == args.prompt_example_user]
-        if not hits:
-            raise ValueError(f"--prompt-example-user={args.prompt_example_user!r} not selected for inference")
-        chosen = hits[0]
-    sections = filled_prompt_sections(chosen, args.run_native, args.run_latest_only,
-                                        args.run_recent3)
-    system_msg = "You are a recommendation ranking system. Return only the requested candidate-label ranking."
-    text_parts = [f"Dataset: {args.dataset}", f"Example user: {chosen['user_id']}",
-                  "System message (common to every condition):", system_msg]
-    for mode, prompt in sections.items():
-        text_parts += ["", "="*32 + f" {mode.upper()} " + "="*32, prompt]
-    (run_dir / "prompt_example.txt").write_text("\n".join(text_parts) + "\n", encoding="utf-8")
-    details = {
-        "dataset": args.dataset, "user_id": chosen["user_id"],
-        "system_message": system_msg, "rank_prompt_version": RANK_PROMPT_VERSION,
-        "history_items": chosen["history_items"],
-        "latest_observed_behavior": chosen["latest_behavior"],
-        "recent3_observed_behaviors": chosen["recent3_behaviors"] if args.run_recent3 else None,
-        "recent3_prompt_version": RECENT3_PROMPT_VERSION if args.run_recent3 else None,
-        "tree_query": chosen["tree_result"],
-        "predicted_next_states": chosen["predicted_transition"],
-        "candidate_label_map": {f"C{i:02d}": x for i,x in enumerate(chosen["candidate_items"],1)},
-        "prompts": sections,
-        "notice": "Held-out test item is NOT identified in the model prompt. Targets are used only for metrics.",
-    }
-    dump_json(run_dir / "prompt_example.json", details)
-    if args.save_all_prompts:
-        with (run_dir / "prompts_all.jsonl").open("w", encoding="utf-8") as out:
-            for r in prepared:
-                out.write(json.dumps({"user_id": r["user_id"],
-                                      "prompts": filled_prompt_sections(r, args.run_native, args.run_latest_only,
-                                                                         args.run_recent3)},
-                                     ensure_ascii=False) + "\n")
-    return {"sample_user_id": chosen["user_id"], "prompt_example_txt": str(run_dir / "prompt_example.txt"),
-            "prompt_example_json": str(run_dir / "prompt_example.json"),
-            "all_prompts_jsonl": str(run_dir / "prompts_all.jsonl") if args.save_all_prompts else None}

@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
-from bt4rec.common.text import clean_text
 
 
 def format_history(
@@ -244,78 +243,3 @@ def controlled_prompt(history_items, candidate_items, latest, how, recent3=None)
     assert 'PREDICTED NEXT TRANSITION' not in prompt
     assert 'higher collaborative probability' not in prompt
     return prompt
-
-
-def append_order1_persistence_prompt_v1(prompt: str, persistence: Dict[str, Any]) -> str:
-    """Legacy (v1) block: one scalar, verbose wording. Kept for reproducing old runs."""
-    header = '4) LAST-BEHAVIOR PERSISTENCE — order-1, last observed HOW state only'
-    if persistence.get('available'):
-        value = f"{float(persistence['probability_next_same_behavior_state']):.4f}"
-        block = (
-            header + '\n'
-            + 'P(next behavior state = latest behavior state | latest behavior state) = ' + value + '\n'
-            + 'This estimates persistence of the same abstract HOW pattern, not repetition of an item.\n'
-            + 'The estimate uses only the latest behavior state (order-1), independent of the\n'
-            + 'longer-context next-behavior prediction above. Treat it as a soft calibration\n'
-            + 'signal for continuity versus change, not as a guaranteed outcome.\n'
-        )
-    else:
-        block = (
-            header + '\n'
-            + 'Not estimable from the frozen Tree for this user; do not assume zero\n'
-            + 'persistence or substitute a ROOT-only probability.\n'
-        )
-    anchor = 'CANDIDATE ITEMS\n'
-    if prompt.count(anchor) != 1:
-        raise AssertionError('Expected exactly one candidate block in bt4rec prompt')
-    return prompt.replace(anchor, block + '\n' + anchor, 1)
-
-
-def append_order1_persistence_prompt(
-    prompt: str,
-    persistence: Dict[str, Any],
-    latest_behavior: Optional[Dict[str, Any]] = None,
-    version: str = "v2",
-    latest_how: Optional[Dict[str, Any]] = None,
-) -> str:
-    """Section 4: probability that the next behavior keeps the latest behavior pattern.
-
-    v2 (default) names the latest observed behavior (WHAT) the probability refers to,
-    and its observed HOW (mechanism / scope / trajectory of the user's own latest
-    window), so the probability is anchored to a concrete behavior pattern.
-    """
-    if version == "v1":
-        return append_order1_persistence_prompt_v1(prompt, persistence)
-    if version != "v2":
-        raise ValueError(f"Unknown stay prompt version {version!r}")
-    lines = ["4) LAST-BEHAVIOR PERSISTENCE"]
-    if latest_behavior:
-        what = clean_text(latest_behavior.get("recommendation_behavior"))
-        focus = [clean_text(x) for x in (latest_behavior.get("semantic_focus") or []) if clean_text(x)]
-        if what:
-            lines.append("Latest observed behavior: " + what)
-        if focus:
-            lines.append("Latest semantic focus: " + ", ".join(focus))
-    if latest_how:
-        parts = []
-        if clean_text(latest_how.get("mechanism")):
-            parts.append("mechanism=" + clean_text(latest_how["mechanism"]))
-        if clean_text(latest_how.get("scope")):
-            parts.append("scope=" + clean_text(latest_how["scope"]))
-        how = ", ".join(parts)
-        traj = clean_text(latest_how.get("trajectory_signature"))
-        if traj:
-            how = (how + "; " if how else "") + "trajectory: " + traj
-        if how:
-            lines.append("Latest observed HOW: " + how)
-    if persistence.get("available"):
-        value = f"{float(persistence['probability_next_same_behavior_state']):.4f}"
-        lines.append("Probability that the next behavior stays with this behavior pattern: " + value)
-    else:
-        lines.append("Probability that the next behavior stays with this behavior pattern: not available.")
-    lines.append("This estimates persistence of the same abstract HOW pattern, not repetition of an item.")
-    block = "\n".join(lines) + "\n"
-    anchor = "CANDIDATE ITEMS\n"
-    if prompt.count(anchor) != 1:
-        raise AssertionError("Expected exactly one candidate block in bt4rec prompt")
-    return prompt.replace(anchor, block + "\n" + anchor, 1)

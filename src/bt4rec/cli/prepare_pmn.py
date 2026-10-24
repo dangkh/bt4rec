@@ -10,7 +10,7 @@ Imports shared utilities from inference_comemtree_qwen_shared.py (the LIST
 ranking version used for CoMemTree reproducibility).
 
 
-Refactored entry point (formerly prepare_pmn_summaries.py). Run: python -m bt4rec.cli.prepare_pmn --help
+Run: python -m bt4rec.cli.prepare_pmn --help
 """
 from __future__ import annotations
 

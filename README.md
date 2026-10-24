@@ -1,92 +1,135 @@
-# BT4Rec / CoMemTree
+# CoMemTree
 
-Collaborative reverse behaviour Tree cho LLM sequential recommendation. LLM ranker nhận
-**WHAT** (hành vi mới nhất của user) + **HOW** (trạng thái hành vi kế tiếp do Tree dự đoán).
+Collaborative behaviour memory tree for LLM-based sequential recommendation.
 
-## Cấu trúc
+An LLM ranker scores the next item of a user from two pieces of behaviour evidence:
 
-```
-configs/            preset dataset (history, tree_dir, protocol) + siêu tham số Tree
-scripts/            wrapper .sh mỏng, đánh số theo thứ tự pipeline
-  01_prepare_protocol.sh   02_precompute_behavior.sh   03_build_tree.sh
-  04_prepare_baselines.sh  05_run_ablation.sh           dev/verify_against_legacy.py
-src/bt4rec/
-  common/      io, text, seeding, vectors
-  taxonomy.py  ★ chuẩn hoá mechanism/scope/direction + text embed (dùng chung builder & inference)
-  data/        protocol, items, candidates, behavior_cache
-  behavior/    windows, parsing, records, gemma.py, qwen.py   (backend trích xuất hành vi)
-  tree/        memories, embeddings, clustering, assign ★, builder, vocab, query, stats
-  llm/         encoder (Qwen3-Embedding), ranker (Qwen2.5 list ranker)
-  ranking/     prompts, modes, parse
-  guidance/    sources (latest/random/global/oracle), pmn, persistence (P(stay))
-  eval/        metrics (+ paired bootstrap), cost (cost_summary.json dùng chung mọi phương pháp)
-  inference/   inputs, audit, constants
-  baselines/   pmn_summaries, oracle
-  cli/         prepare_protocol, precompute, build_tree, prepare_pmn, prepare_oracle, run, config
-baseline/           Native, i2Agent (prior/direct), aMem4Rec, Random/Pop/LightGCN/SASRec — xem baseline/README.md
-tests/              unit test + dữ liệu giả lập (không cần GPU)
-legacy/             bản gốc các script cũ (để tái lập số liệu cũ / đối chiếu)
-```
+- **WHAT**: what the user currently prefers. This is the semantic behaviour of the user's
+  latest interaction window (`recommendation_behavior` + `semantic_focus`).
+- **HOW**: how that preference is expected to evolve. This is the `mechanism`, `scope` and
+  `trajectory_signature` of the next behaviour state predicted by a collaborative
+  reverse suffix Tree, learned from the behaviour sequences of training users.
 
-## Cài đặt & chạy
+Behaviour memories are extracted once, offline (one LLM call per 3-item window). Inference
+uses one ranking call per user.
+
+## Installation
 
 ```bash
-pip install -e .            # hoặc: export PYTHONPATH=$PWD/src
+pip install -e .            # or: export PYTHONPATH=$PWD/src
 pip install -e .[gpu]       # torch, transformers, sentence-transformers, unsloth
-
-bash scripts/01_prepare_protocol.sh CDs
-CUDA_VISIBLE_DEVICES=0 BACKEND=qwen bash scripts/02_precompute_behavior.sh CDs run
-bash scripts/03_build_tree.sh CDs
-CUDA_VISIBLE_DEVICES=0 bash scripts/04_prepare_baselines.sh CDs all      # chỉ cần cho pmn / oracle
-MODES=latest_only,tree,tree_stay bash scripts/05_run_ablation.sh CDs main
 ```
 
-Mọi CLI đều có `--help`, ví dụ `python -m bt4rec.cli.run --help`. Biến môi trường của từng
-script ghi ở đầu file (`DRY_RUN=1` để chỉ in lệnh).
+## Repository layout
 
-## Bảng đối chiếu file cũ → mới
+```
+configs/            dataset presets (configs/datasets/*.yaml) and Tree hyper-parameters (configs/tree.yaml)
+scripts/            pipeline wrappers 01_ ... 05_ and analysis scripts
+src/bt4rec/
+  data/        frozen protocol, items, candidates, behaviour cache
+  behavior/    window construction and behaviour extraction (gemma / qwen backends)
+  tree/        memories, embeddings, clustering, state assignment, Tree builder and query
+  llm/         Qwen3 sentence encoder, Qwen2.5 list ranker
+  ranking/     prompts, ranking conditions (modes), output parser
+  guidance/    HOW sources for the ablations (random, Tree root, PMN, oracle)
+  eval/        metrics (+ paired bootstrap), cost accounting
+  cli/         prepare_protocol, precompute, build_tree, prepare_pmn, prepare_oracle, run
+baseline/           LLMRank (native), i2Agent, MemRec, aMem4Rec, A-LLMRec, SASRec / LightGCN
+tests/              unit tests on synthetic data (no GPU)
+```
 
-| File cũ | Thay bằng |
-|---|---|
-| `prepare_data.py` | `bt4rec.cli.prepare_protocol` |
-| `precompute_behavior.py` | `bt4rec.cli.precompute --backend gemma` |
-| `precompute_train_test_shared_qwen.py` | `bt4rec.cli.precompute --backend qwen` |
-| `build_reverse_behavior_tree.py` | `bt4rec.cli.build_tree` |
-| `inference_bt4rec_ablation.py` | `bt4rec.cli.run` (tất cả mode, kể cả native / latest_only / recent3 / tree_original) |
-| `inference_bt4rec.py`, `inference_bt4rec_reproduce.py` | giữ trong `legacy/` (prompt gốc, chỉ để tái lập) |
-| `prepare_pmn_summaries.py` | `bt4rec.cli.prepare_pmn` |
-| `prepare_target_user_oracle.py` | `bt4rec.cli.prepare_oracle` |
-| `run_bt4rec_ablation.sh`, `run_comemtree_behavior_ablation_protocol.sh`, `run_recent3_tree_protocol.sh` | `scripts/05_run_ablation.sh` (chọn bằng `MODES=`) |
-| `run_pmn_protocol.sh` | `scripts/04_prepare_baselines.sh … pmn` + `MODES=pmn` |
-| module thiếu `inference_comemtree_qwen_shared` | `bt4rec.shared` (đã có sẵn) |
-| module thiếu `oracle_probe_qwen` | `bt4rec.taxonomy` (fallback; dùng file gốc nếu có trên PYTHONPATH) |
-
-## Thay đổi hành vi so với bản cũ
-
-Code được **copy nguyên văn** từ script cũ; chỉ những điểm sau thay đổi:
-
-1. **Chuẩn hoá nhãn thống nhất** (`taxonomy.py`): builder cũ giữ dấu `/` nên `same collection/series`
-   được embed khác lúc train và test. Giờ cả hai dùng một hàm. Tree mới ghi `taxonomy_version`;
-   inference cảnh báo nếu dùng Tree cũ → **nên build lại Tree**.
-2. **Gán state dùng chung một quy tắc** (`tree/assign.py`): builder mặc định gán lại nhãn bằng
-   cosine tới centroid tương thích gần nhất, giống hệt inference (`--label-assignment kmeans` = cũ).
-3. **Signature của state = medoid** thay vì chuỗi xuất hiện nhiều nhất (`--state-signature mode` = cũ).
-4. **`--collapse-consecutive-states`** được ghi vào metadata của Tree; inference gộp state liên tiếp
-   y như lúc build, và P(stay) báo "không ước lượng được" thay vì một con số vô nghĩa.
-5. **`random_how`** không còn crash khi `train_users == eval_users` (chỉ cần một user nguồn khác chính target).
-6. **PMN**: `prepare_pmn` ghi `summary_version` v3 trong khi `run` chỉ nhận v4 (và dùng version trong
-   `summary_key`), nên mọi profile bị bỏ qua. Giờ dùng chung `PMN_VERSION`.
-7. **Summary** thêm `metrics_complete_paired` (cùng tập user cho mọi mode) và
-   `paired_bootstrap_vs_latest_only` (CI 95% + p-value).
-
-Tái lập Tree cũ: `LEGACY=1 bash scripts/03_build_tree.sh CDs`.
-
-## Kiểm tra
+## Pipeline
 
 ```bash
-python -m pytest tests                     # hoặc: python -m unittest discover -s tests
-python scripts/dev/verify_against_legacy.py --legacy-dir legacy
+bash scripts/01_prepare_protocol.sh CDs                                  # frozen users / candidates
+CUDA_VISIBLE_DEVICES=0 bash scripts/02_precompute_behavior.sh CDs run    # behaviour memories (offline)
+CUDA_VISIBLE_DEVICES=0 bash scripts/03_build_tree.sh CDs                 # collaborative Tree
+CUDA_VISIBLE_DEVICES=0 bash scripts/05_run_ablation.sh CDs main          # ranking
 ```
 
-`verify_against_legacy.py` chạy toàn bộ pipeline (protocol → precompute → tree → ranking) trên dữ liệu
-giả lập bằng cả script cũ lẫn package mới ở chế độ tương thích, rồi so sánh từng file đầu ra.
+Datasets: `CDs`, `Video_Games`, `ML`, `Books`. Every CLI has `--help`, for example
+`python -m bt4rec.cli.run --help`. Set `DRY_RUN=1` to print the commands without running them.
+
+The equivalent direct call for the ranking step:
+
+```bash
+python -m bt4rec.cli.run --dataset CDs --modes native,latest_what_only,latest_how_only,tree,tree_v2
+```
+
+## Ranking conditions (`--modes`)
+
+All conditions share the same history (20 train items; 30 for ML), the same 20 frozen
+candidates, the same output format (a JSON list of candidate labels) and the same parser.
+They differ only in section 2 (WHAT) and section 3 (HOW) of the prompt.
+
+| Mode | WHAT | HOW | |
+|---|---|---|---|
+| `native` | – | – | history and candidates only (LLMRank) |
+| `latest_what_only` | latest window | – | reference condition in `summary.json` |
+| `latest_how_only` | – | latest window | |
+| `tree` | latest window | Tree prediction | **CoMemTree** |
+| `tree_v2` | latest 3 windows | Tree prediction | **CoMemTree v2** |
+
+Ablation of the HOW source:
+
+| Mode | WHAT | HOW |
+|---|---|---|
+| `random_how_only` | – | random training user |
+| `global_continuation` | latest window | most frequent continuation at the Tree root (same for every user) |
+| `pmn` | latest window | preference-matched neighbour users (`scripts/04_prepare_baselines.sh CDs pmn`) |
+| `oracle` | latest window | derived from the held-out test item: upper bound, diagnostic only (`... CDs oracle`) |
+
+## Tree settings (`configs/tree.yaml`)
+
+| Setting | Default | Ablation flag |
+|---|---|---|
+| State induction | global KMeans (K = 50) over the trajectory embeddings | `--cluster-mode constrained`: hard bucket by mechanism |
+| Assignment | every memory goes to its nearest state | `--confidence-filter`: reject low similarity or low margin assignments |
+| Transition counts | per-user normalised | `--count-mode occurrence` |
+| Query context | full Tree (`--tree-max-query-order 0`) | `--tree-max-query-order 1` / `2` (set on `run`) |
+
+Inference maps test behaviours with the same settings the Tree was built with, read from
+the Tree metadata. For example:
+
+```bash
+TREE_DIR=trees/CDs_1000_20_mech EXTRA_ARGS="--cluster-mode constrained" bash scripts/03_build_tree.sh CDs
+python -m bt4rec.cli.run --dataset CDs --tree-dir trees/CDs_1000_20_mech --modes tree,tree_v2
+```
+
+To build the Tree and evaluate on two disjoint groups of users:
+
+```bash
+python scripts/make_disjoint_split.py --dataset CDs --n 300
+TREE_DIR=trees/CDs_disjoint300 EXTRA_ARGS="--include-users data/CDs/protocol/disjoint300_tree_users.json" \
+  bash scripts/03_build_tree.sh CDs
+python -m bt4rec.cli.run --dataset CDs --tree-dir trees/CDs_disjoint300 --require-user-disjoint-tree \
+  --user-ids-file data/CDs/protocol/disjoint300_eval_users.json --max-users 300 --modes tree,tree_v2
+```
+
+## Outputs
+
+Each run writes the following files to `results/comemtree/<run>/`:
+
+- `rankings.jsonl`: one row per user, with the evidence shown and, for every mode, the
+  ranking, `target_rank`, parse diagnostics and exact token counts
+- `summary.json`: metrics (Hit@K, NDCG@K, MRR) per mode, the differences and paired
+  bootstrap against `latest_what_only`, parse quality, and the configuration
+- `cost_summary.json`: LLM calls and tokens per user, and the number of memories
+- `prompt_example.txt`: the filled-in prompt of every mode for one user
+
+Cost of the offline behaviour extraction (tokenizer only, no GPU):
+
+```bash
+python scripts/count_behavior_tokens.py --dataset CDs
+```
+
+## Baselines
+
+See `baseline/README.md`. All baselines use the same frozen protocol and write the same
+`cost_summary.json` format.
+
+## Tests
+
+```bash
+python -m unittest discover -s tests
+```

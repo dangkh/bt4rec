@@ -104,7 +104,7 @@ import time
 import sys
 import io
 from contextlib import redirect_stdout, redirect_stderr
-from collections import Counter, defaultdict
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
@@ -760,14 +760,8 @@ class LocalQwen:
                 "This script expects a CUDA GPU for Unsloth Qwen inference."
             )
 
-        from bt4rec.llm.openai_chat import gemma_stop_ids, is_gemma
-        self.is_gemma = is_gemma(model_name)
-        print(f"[INFO] Loading {'Gemma' if self.is_gemma else 'Qwen'}: {model_name}", flush=True)
-        loader = FastLanguageModel
-        if self.is_gemma:
-            from unsloth import FastModel
-            loader = FastModel
-        self.model, self.tokenizer = loader.from_pretrained(
+        print(f"[INFO] Loading Qwen: {model_name}", flush=True)
+        self.model, self.tokenizer = FastLanguageModel.from_pretrained(
             model_name=model_name,
             max_seq_length=int(max_seq_length),
             load_in_4bit=bool(load_in_4bit),
@@ -775,17 +769,14 @@ class LocalQwen:
         )
         self.tokenizer = get_chat_template(
             self.tokenizer,
-            chat_template="gemma3" if self.is_gemma else "qwen-2.5",
+            chat_template="qwen-2.5",
         )
         self.tokenizer.padding_side = "left"
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-        # Gemma-3 ends a turn with <end_of_turn>: stop on it too. Qwen: unchanged.
-        self.stop_ids = (gemma_stop_ids(self.tokenizer) if self.is_gemma
-                         else self.tokenizer.eos_token_id)
 
         try:
-            loader.for_inference(self.model)
+            FastLanguageModel.for_inference(self.model)
         except Exception:
             pass
 
@@ -875,7 +866,7 @@ class LocalQwen:
                     do_sample=False,
                     use_cache=True,
                     pad_token_id=self.tokenizer.pad_token_id,
-                    eos_token_id=self.stop_ids,
+                    eos_token_id=self.tokenizer.eos_token_id,
                 )
 
             if torch.cuda.is_available():
@@ -888,18 +879,10 @@ class LocalQwen:
                 skip_special_tokens=True,
             )
 
-            if self.is_gemma:
-                stops = set(self.stop_ids)
-                out_token_counts = []
-                for seq in new_tokens:
-                    toks = [int(t) for t in seq.tolist()]
-                    hits = [i for i, t in enumerate(toks) if t in stops]
-                    out_token_counts.append(hits[0] + 1 if hits else len(toks))
-            else:
-                out_token_counts = [
-                    int((seq != self.tokenizer.pad_token_id).sum().item())
-                    for seq in new_tokens
-                ]
+            out_token_counts = [
+                int((seq != self.tokenizer.pad_token_id).sum().item())
+                for seq in new_tokens
+            ]
             if self.cost is not None:
                 self.cost.batch(stage)
                 for uid, n_in, n_out in zip(user_ids[start : start + batch_size],
@@ -1131,12 +1114,6 @@ class SharedQwenScoreRanker:
         self.model = model
         self.tokenizer = tokenizer
         self.model_name = model_name
-        from bt4rec.llm.openai_chat import gemma_stop_ids, is_gemma
-        # Qwen: eos only (legacy behaviour). Gemma-3: <eos> and <end_of_turn>.
-        self.stop_ids = (gemma_stop_ids(tokenizer) if is_gemma(model_name)
-                         else tokenizer.eos_token_id)
-        self.stop_set = {x for x in ([self.stop_ids] if isinstance(self.stop_ids, int)
-                                     else list(self.stop_ids or [])) if x is not None}
         self.max_seq_length = int(max_seq_length)
         self.max_new_tokens = int(rank_max_new_tokens)
         if self.max_seq_length <= self.max_new_tokens:
@@ -1191,18 +1168,20 @@ class SharedQwenScoreRanker:
                 generated = self.model.generate(
                     **inputs, max_new_tokens=self.max_new_tokens, do_sample=False,
                     use_cache=True, pad_token_id=self.tokenizer.pad_token_id,
-                    eos_token_id=self.stop_ids,
+                    eos_token_id=self.tokenizer.eos_token_id,
                 )[:,width:]
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             elapsed = time.perf_counter()-start_time
             raws = self.tokenizer.batch_decode(generated, skip_special_tokens=True)
             out_counts = []
-            stops = self.stop_set
             for tokens in generated:
                 toks = [int(x) for x in tokens.tolist()]
-                hits = [i for i, t in enumerate(toks) if t in stops]
-                out_counts.append(hits[0]+1 if hits else len(toks))
+                eos = self.tokenizer.eos_token_id
+                if eos is not None and eos in toks:
+                    out_counts.append(toks.index(eos)+1)
+                else:
+                    out_counts.append(len(toks))
             self.generate_calls += 1
             self.samples += len(chunk)
             self.input_tokens += sum(kept)
@@ -1216,7 +1195,8 @@ class SharedQwenScoreRanker:
             for job, raw, full_n, kept_n, out_n, tokens in zip(
                     chunk, raws, lengths, kept, out_counts, generated):
                 ranking, meta = parse_score_response(raw, job["candidate_items"])
-                has_eos = any(int(t) in self.stop_set for t in tokens.tolist())
+                has_eos = (self.tokenizer.eos_token_id is not None
+                           and self.tokenizer.eos_token_id in tokens.tolist())
                 dbg = {
                     "call_type": call_type,
                     "attempts": 1,
@@ -1264,155 +1244,6 @@ class SharedQwenScoreRanker:
             "parse_complete_ratio": sum(bool(x['parse_complete']) for x in self.records)/n if n else 0,
             "users_with_score_ties": sum(x['score_tie_count'] > 0 for x in self.records),
             "call_type_counts": dict(__import__('collections').Counter(x['call_type'] for x in self.records)),
-        }
-
-    def tracking_records(self):
-        return list(self.records)
-
-
-# =============================================================================
-# OpenAI backends (--llm openai): same prompts, system prompts, parsers and cost
-# accounting as the local classes above; tokens = API usage.
-# =============================================================================
-
-class OpenAIGenerator:
-    """Drop-in for LocalQwen (generate_batch / generate_one / stats)."""
-
-    def __init__(self, client) -> None:
-        self.client = client
-        self.model_name = client.model
-        self.generate_calls = 0
-        self.samples = 0
-        self.input_tokens = 0
-        self.output_tokens = 0
-        self.total_time_sec = 0.0
-        self.stage_samples: Dict[str, int] = defaultdict(int)
-        self.stage_calls: Dict[str, int] = defaultdict(int)
-        self.cost: Optional[CostTracker] = None
-
-    def generate_batch(self, prompts, batch_size, max_new_tokens, stage,
-                       system_prompt="You are a careful recommendation assistant.", user_ids=None):
-        if not prompts:
-            return []
-        if user_ids is None:
-            user_ids = [None] * len(prompts)
-        if len(user_ids) != len(prompts):
-            raise ValueError("user_ids must align with prompts")
-        out: List[str] = []
-        bs = max(1, int(batch_size), 4 * self.client.workers)
-        starts = list(range(0, len(prompts), bs))
-        for start in tqdm(starts, desc=f"[{stage}]", unit="chunk", dynamic_ncols=True, file=sys.__stderr__):
-            chunk = list(prompts[start:start + bs])
-            t0 = time.perf_counter()
-            res = self.client.generate(chunk, system_prompt, int(max_new_tokens))
-            elapsed = time.perf_counter() - t0
-            if self.cost is not None:
-                self.cost.batch(stage)
-                for uid, r in zip(user_ids[start:start + bs], res):
-                    self.cost.llm(stage, uid, r["input_tokens"], r["output_tokens"])
-            self.generate_calls += 1
-            self.stage_calls[stage] += 1
-            self.samples += len(chunk)
-            self.stage_samples[stage] += len(chunk)
-            self.input_tokens += sum(r["input_tokens"] for r in res)
-            self.output_tokens += sum(r["output_tokens"] for r in res)
-            self.total_time_sec += elapsed
-            out.extend(str(r["text"]).strip() for r in res)
-        return out
-
-    def generate_one(self, prompt, max_new_tokens, stage,
-                     system_prompt="You are a careful recommendation assistant.", user_id=None):
-        return self.generate_batch([prompt], 1, max_new_tokens, stage, system_prompt, [user_id])[0]
-
-    def stats(self) -> Dict[str, Any]:
-        return {
-            "backend": "openai", "model": self.model_name,
-            "generate_calls": int(self.generate_calls), "samples": int(self.samples),
-            "input_tokens": int(self.input_tokens), "output_tokens": int(self.output_tokens),
-            "total_tokens": int(self.input_tokens + self.output_tokens),
-            "total_time_sec": round(float(self.total_time_sec), 4),
-            "stage_calls": dict(self.stage_calls), "stage_samples": dict(self.stage_samples),
-            "avg_sample_time_sec": round(self.total_time_sec / self.samples, 4) if self.samples else 0.0,
-            **self.client.stats(),
-        }
-
-
-class OpenAIScoreRanker:
-    """Drop-in for SharedQwenScoreRanker: same score prompt / system prompt / parser."""
-
-    def __init__(self, client, rank_max_new_tokens=1024, debug=False):
-        self.client = client
-        self.model_name = client.model
-        self.max_new_tokens = int(rank_max_new_tokens)
-        self.debug = bool(debug)
-        self.records = []
-        self.generate_calls = 0
-        self.samples = 0
-        self.input_tokens = 0
-        self.output_tokens = 0
-        self.total_time_sec = 0.0
-        self.cost = None
-
-    def rank_jobs(self, jobs, batch_size=4, call_type="ranking", max_retries=0):
-        if not jobs:
-            return []
-        bs = max(1, int(batch_size), 4 * self.client.workers)
-        system = "You are a recommendation ranking system. Return only the requested valid JSON."
-        all_results = []
-        for start in tqdm(range(0, len(jobs), bs), desc=f"[{call_type}-score]", unit="chunk",
-                          dynamic_ncols=True, file=sys.__stderr__):
-            chunk = list(jobs[start:start + bs])
-            prompts = [build_score_prompt(history_items=j.get("history_items", []),
-                                          candidate_items=j["candidate_items"],
-                                          method_context=j.get("method_context")) for j in chunk]
-            t0 = time.perf_counter()
-            res = self.client.generate(prompts, system, self.max_new_tokens)
-            elapsed = time.perf_counter() - t0
-            self.generate_calls += 1
-            self.samples += len(chunk)
-            self.input_tokens += sum(r["input_tokens"] for r in res)
-            self.output_tokens += sum(r["output_tokens"] for r in res)
-            self.total_time_sec += elapsed
-            if self.cost is not None:
-                stage = {"native": "native_prior", "i2agent": "final_ranking"}.get(call_type, call_type)
-                self.cost.batch(stage)
-                for job, r in zip(chunk, res):
-                    self.cost.llm(stage, str(job.get("user_id", "")), r["input_tokens"], r["output_tokens"])
-            for job, r in zip(chunk, res):
-                ranking, meta = parse_score_response(r["text"], job["candidate_items"])
-                limit = r.get("finish_reason") == "length"
-                meta.update({
-                    "call_type": call_type, "attempts": 1,
-                    "full_input_tokens": r["input_tokens"], "input_tokens": r["input_tokens"],
-                    "truncated_input_tokens": 0, "input_truncated": False, "context_budget_risk": False,
-                    "output_tokens": r["output_tokens"], "output_limit_reached": bool(limit),
-                    "output_has_eos": not limit, "elapsed_sec": elapsed / max(1, len(chunk)),
-                    "api_cached": bool(r.get("cached")),
-                })
-                self.records.append(dict(user_id=str(job.get("user_id", "")), **{
-                    k: v for k, v in meta.items() if k not in ("raw_output", "scores_by_label", "predicted_labels")
-                }))
-                all_results.append((ranking, meta))
-        return all_results
-
-    def stats(self):
-        n = self.samples
-        recs = self.records
-        return {
-            "prompt_version": SHARED_RANK_PROMPT_VERSION, "ranking_mode": "score",
-            "backend": "openai", "model": self.model_name, "debug_enabled": self.debug,
-            "generate_calls": self.generate_calls, "samples": n,
-            "input_tokens": self.input_tokens, "output_tokens": self.output_tokens,
-            "total_tokens": self.input_tokens + self.output_tokens,
-            "total_time_sec": round(self.total_time_sec, 4),
-            "avg_sample_time_sec": round(self.total_time_sec / n, 4) if n else 0,
-            "input_truncated_count": 0, "context_budget_risk_count": 0,
-            "output_limit_reached_count": sum(bool(x["output_limit_reached"]) for x in recs),
-            "parse_complete_count": sum(bool(x["parse_complete"]) for x in recs),
-            "parse_complete_ratio": sum(bool(x["parse_complete"]) for x in recs) / n if n else 0,
-            "users_with_score_ties": sum(x["score_tie_count"] > 0 for x in recs),
-            "call_type_counts": dict(Counter(x["call_type"] for x in recs)),
-            **self.client.stats(),
         }
 
     def tracking_records(self):
@@ -1834,7 +1665,6 @@ def main(args: argparse.Namespace) -> None:
         },
         "model": {
             "name": args.model,
-            "llm_backend": args.llm,
             "output_mode": "score",
             "load_in_4bit": args.load_in_4bit,
             "max_seq_length": args.max_seq_length,
@@ -1844,32 +1674,24 @@ def main(args: argparse.Namespace) -> None:
     }
     dump_json(snapshot_path, snapshot)
 
-    if args.llm == "openai":
-        from bt4rec.llm.openai_chat import OpenAIChat
-        api = OpenAIChat(args.model, temperature=0.0, seed=args.seed, workers=args.api_workers,
-                         api_base=args.api_base,
-                         cache_path=args.api_cache or str(output_dir / "openai_cache.jsonl"))
-        gemma = OpenAIGenerator(api)
-        shared_ranker = OpenAIScoreRanker(api, rank_max_new_tokens=args.rank_max_new_tokens,
-                                          debug=args.debug_ranking)
-    else:
-        gemma = LocalQwen(
-            model_name=args.model,
-            max_seq_length=args.max_seq_length,
-            load_in_4bit=args.load_in_4bit,
-        )
-        # Reuse the same loaded weights (Qwen or Gemma) for the shared SCORE ranking task.
-        shared_ranker = SharedQwenScoreRanker(
-            model_name=args.model,
-            max_seq_length=args.max_seq_length,
-            load_in_4bit=args.load_in_4bit,
-            rank_max_new_tokens=args.rank_max_new_tokens,
-            temperature=0.0,
-            seed=args.seed,
-            model=gemma.model,
-            tokenizer=gemma.tokenizer,
-            debug=args.debug_ranking,
-        )
+    gemma = LocalQwen(
+        model_name=args.model,
+        max_seq_length=args.max_seq_length,
+        load_in_4bit=args.load_in_4bit,
+    )
+
+    # Reuse the same loaded Qwen weights for the controlled shared SCORE ranking task.
+    shared_ranker = SharedQwenScoreRanker(
+        model_name=args.model,
+        max_seq_length=args.max_seq_length,
+        load_in_4bit=args.load_in_4bit,
+        rank_max_new_tokens=args.rank_max_new_tokens,
+        temperature=0.0,
+        seed=args.seed,
+        model=gemma.model,
+        tokenizer=gemma.tokenizer,
+        debug=args.debug_ranking,
+    )
     cost = CostTracker(f"i2agent_{args.variant}")
     gemma.cost = cost
     shared_ranker.cost = cost
@@ -2462,22 +2284,9 @@ def parse_args() -> argparse.Namespace:
 
     # Same Qwen setup; all native-generated and final ranking outputs are scores.
     p.add_argument(
-        "--llm",
-        choices=["qwen", "gemma", "openai"],
-        default="qwen",
-        help="LLM for ALL i2Agent stages (probe/profile/knowledge/dynamic/native prior/final "
-             "ranking). qwen = legacy default; gemma = local Gemma-3; openai = chat API "
-             "(OPENAI_API_KEY from env).",
-    )
-    p.add_argument(
         "--model",
-        default=None,
-        help="default by --llm: Qwen/Qwen2.5-7B-Instruct | "
-             "unsloth/gemma-3-4b-it-unsloth-bnb-4bit | gpt-4o-mini",
+        default="Qwen/Qwen2.5-7B-Instruct",
     )
-    p.add_argument("--api-workers", type=int, default=8, help="parallel API requests (--llm openai)")
-    p.add_argument("--api-base", default=None, help="optional OpenAI-compatible base URL")
-    p.add_argument("--api-cache", default=None, help="default <output-dir>/openai_cache.jsonl")
     p.add_argument(
         "--max-seq-length",
         type=int,
@@ -2580,15 +2389,10 @@ def parse_args() -> argparse.Namespace:
         args.candidate_file = str(
             protocol_dir / f"user_candidates_testpool1000_seed{args.seed}.json"
         )
-    if args.model is None:
-        args.model = {"qwen": "Qwen/Qwen2.5-7B-Instruct",
-                      "gemma": "unsloth/gemma-3-4b-it-unsloth-bnb-4bit",
-                      "openai": "gpt-4o-mini"}[args.llm]
     if args.output_dir is None:
         dataset_name = data_dir.name or "dataset"
-        llm_tag = "" if args.llm == "qwen" else f"_{args.llm}"
         args.output_dir = str(
-            Path("results") / "baselines" / dataset_name / f"i2agent_{args.variant}{llm_tag}"
+            Path("results") / "baselines" / dataset_name / f"i2agent_{args.variant}"
         )
 
     return args

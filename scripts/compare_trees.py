@@ -5,7 +5,7 @@
 
 Reads <tree>/tree_stats.json (written by bt4rec.cli.build_tree) and prints one row per Tree:
 states, accepted-assignment ratio, silhouette, state sizes, self-transition ratio
-(= how often the next window keeps the same state; drives P(stay)), distinct states
+(= how often the next window keeps the same state), distinct states
 per user, and active predictive context nodes per order. More clusters = finer HOW
 states but sparser contexts: watch accepted_ratio, min state size and active nodes.
 """

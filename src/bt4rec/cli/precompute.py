@@ -42,7 +42,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     be = BACKENDS[known.backend]
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--backend", choices=sorted(BACKENDS), default="gemma",
-                   help="gemma = legacy precompute_behavior.py; qwen = precompute_train_test_shared_qwen.py")
+                   help="behaviour extraction LLM: gemma (Gemma-3-4B-it, default) or qwen (Qwen2.5-7B-Instruct)")
     p.add_argument("--dataset", help="Dataset name, e.g. CDs, Video_Games, Books, ML")
     p.add_argument("--data-root", default="data", help="Root folder containing dataset subfolders")
     p.add_argument("--data-dir", help="Optional direct dataset folder; alternative to --dataset")

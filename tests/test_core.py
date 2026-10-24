@@ -165,31 +165,39 @@ class ConfigTest(unittest.TestCase):
                 self.assertIn(key, cfg, p.name)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class ModePromptTest(unittest.TestCase):
+    """Section 2 (WHAT) / section 3 (HOW) of every ranking condition."""
 
+    def _item(self):
+        c = [{"item_id": f"i{k}", "title": f"T{k}", "category": "Pop"} for k in range(4)]
+        latest = {"recommendation_behavior": "Prefers jazz albums", "semantic_focus": ["jazz"]}
+        how = lambda tag: {"mechanism": "deepening", "scope": "same creator",  # noqa: E731
+                           "trajectory_signature": f"how-{tag}"}
+        return {"history_items": c[:2], "candidate_items": c, "latest_behavior": latest,
+                "recent3_behaviors": [latest, latest],
+                "hows": {k: how(k) for k in ("latest_how", "tree", "random_how",
+                                             "global_continuation", "pmn", "oracle")}}
 
-class StayPromptTest(unittest.TestCase):
-    def test_v2_block(self):
-        from bt4rec.ranking.prompts import append_order1_persistence_prompt
-        base = "header\nCANDIDATE ITEMS\n[C01] x"
-        latest = {"recommendation_behavior": "Prefers jazz albums", "semantic_focus": ["jazz", "albums"]}
-        how = {"mechanism": "deepening", "scope": "same subcategory",
-               "trajectory_signature": "moves further into one focused style"}
-        out = append_order1_persistence_prompt(
-            base, {"available": True, "probability_next_same_behavior_state": 0.25}, latest,
-            latest_how=how)
-        self.assertIn("4) LAST-BEHAVIOR PERSISTENCE\nLatest observed behavior: Prefers jazz albums\n"
-                      "Latest semantic focus: jazz, albums\n"
-                      "Latest observed HOW: mechanism=deepening, scope=same subcategory; "
-                      "trajectory: moves further into one focused style\n"
-                      "Probability that the next behavior stays with this behavior pattern: 0.2500\n"
-                      "This estimates persistence of the same abstract HOW pattern, not repetition of an item.\n"
-                      "\nCANDIDATE ITEMS", out)
-        na = append_order1_persistence_prompt(base, {"available": False}, latest)
-        self.assertIn("behavior pattern: not available.", na)
-        v1 = append_order1_persistence_prompt(base, {"available": False}, latest, version="v1")
-        self.assertIn("Not estimable from the frozen Tree", v1)
+    def test_sections(self):
+        from bt4rec.inference.constants import AB_MODES
+        from bt4rec.ranking.modes import mode_prompt, requested_modes
+        item = self._item()
+        expect = {  # mode -> (WHAT shown, HOW tag shown)
+            "native": (False, None), "latest_what_only": (True, None),
+            "latest_how_only": (False, "latest_how"), "tree": (True, "tree"), "tree_v2": (True, "tree"),
+            "random_how_only": (False, "random_how"), "global_continuation": (True, "global_continuation"),
+            "pmn": (True, "pmn"), "oracle": (True, "oracle"),
+        }
+        self.assertEqual(set(expect), set(AB_MODES))
+        for mode, (what, how) in expect.items():
+            p = mode_prompt(mode, item)
+            self.assertEqual("Prefers jazz albums" in p, what, mode)
+            for tag in item["hows"]:
+                self.assertEqual(f"how-{tag}" in p, tag == how, (mode, tag))
+            self.assertEqual("RECENT OBSERVED BEHAVIORS" in p, mode == "tree_v2", mode)
+            self.assertEqual(p.count("OUTPUT REQUIREMENTS"), 1)
+        with self.assertRaises(ValueError):
+            requested_modes("tree,tree_stay")
 
 
 class CostTest(unittest.TestCase):
@@ -207,3 +215,7 @@ class CostTest(unittest.TestCase):
         self.assertEqual(s["online"]["shared_calls"]["calls"], 1)
         self.assertEqual(s["online"]["attributable_calls_per_user"]["mean"], 1.0)
         self.assertAlmostEqual(s["end_to_end_per_eval_user"]["llm_calls"], 2.0)
+
+
+if __name__ == "__main__":
+    unittest.main()

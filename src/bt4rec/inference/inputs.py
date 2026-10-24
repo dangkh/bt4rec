@@ -154,7 +154,7 @@ def resolve_source_files(args, modes):
             if guess.is_file():
                 args.source_user_ids_file = str(guess)
                 break
-    used = [('train-behaviors',args.train_behaviors,need_random,'random_how/random_only'),
+    used = [('train-behaviors',args.train_behaviors,need_random,'random_how_only'),
             ('pmn-summaries',args.pmn_summaries,'pmn' in modes,'pmn'),
             ('oracle-behaviors',args.oracle_behaviors,'oracle' in modes,'oracle')]
     for name,path,needed,mode in used:

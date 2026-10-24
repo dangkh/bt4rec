@@ -1,85 +1,39 @@
 """
-Inference for the dual-view collaborative behavior Tree.
+CoMemTree inference: rank the frozen candidates of every evaluation user under the
+requested conditions (``--modes``) with one Qwen2.5 list-ranking call per user and mode.
 
-Core idea
----------
-The dual-view precompute intentionally separates:
+WHAT = the user's own latest observed semantic behavior (recommendation_behavior +
+       semantic_focus of the latest window; tree_v2: the latest 3 windows).
+HOW  = how that preference is expected to evolve: mechanism + scope +
+       trajectory_signature of the next behavior state predicted by the collaborative
+       Tree (CoMemTree), or of another source in the ablation modes.
 
-    WHAT the target user currently prefers
-        = latest recommendation_behavior + semantic_focus
-
-from:
-
-    HOW that preference is expected to evolve next
-        = collaborative Tree predicted abstract state
-          (mechanism + scope + trajectory_signature)
-
-The final ranking LLM receives BOTH directly. There is NO extra LLM behavior
-composer, so the method uses only one ranking LLM call per condition.
+Conditions (bt4rec.inference.constants)
+---------------------------------------
+Main:      native, latest_what_only, latest_how_only, tree, tree_v2
+Ablation:  random_how_only, global_continuation, pmn, oracle
 
 Pipeline
 --------
 precomputed test behaviors
-    -> trajectory-only mapping to frozen KMeans states
-    -> query reverse suffix Tree
-    -> latest semantic behavior (WHAT)
-       + predicted abstract transition/state (HOW)
-    -> candidate ranking
+    -> trajectory-only mapping to the frozen Tree states
+    -> query the reverse suffix Tree (--tree-max-query-order)
+    -> prompt = history + WHAT + HOW + candidates
+    -> list ranking (C01..Cn labels), no retry, missing labels appended in frozen order
 
-Controlled ranking conditions
------------------------------
-1) Native:
-      history + candidates
-
-2) Latest-only:
-      history + latest observed semantic behavior + candidates
-
-3) Recent-3 (additional baseline):
-      history + last 3 observed semantic behaviors + candidates
-      (no predicted Tree transition)
-
-4) Tree (main):
-      history + latest observed semantic behavior
-      + Tree predicted next abstract state + candidates
-
-All conditions use the SAME frozen candidates and list ranking/output protocol.
-The original Native, Latest-only, and Tree prompts are unchanged.
-
-Important implementation details
---------------------------------
-- No behavior generation at inference time.
-- No GT/test item is used to construct behavior evidence.
-- Candidate order is loaded EXACTLY from --candidate-file and is never reshuffled
-  at inference time. This keeps Tree / Latest-only / Native aligned with the same
-  frozen candidate protocol used by the compared rankers.
-- Test behavior -> state mapping uses the SAME structured trajectory text used
-  by build_reverse_behavior_tree_dual.py.
-- When the Tree was trained with mechanism-constrained KMeans, test mapping is
-  restricted to states with the same mechanism whenever compatible states exist.
-- Ambiguous/rejected test mappings BREAK the recent state suffix by default,
-  matching the segmented transition construction used by the current Tree builder.
-- Semantic fields from other users / cluster medoids are NEVER injected into the
-  ranking prompt. The predicted state contributes abstract transition information only.
-- Incomplete rankings are NOT retried. They are sanitized like the native baseline.
-  Summary still reports parse-complete quality for audit.
-
-Expected inputs
----------------
-Dual test behavior cache:
-    precompute_test_behaviors_gemma_dual_v2.py output
-
-Tree directory:
-    build_reverse_behavior_tree_dual.py output containing:
-      behavior_states.json
-      behavior_state_embeddings.npy
-      behavior_tree.json
+Guarantees
+----------
+- No behavior generation at inference time; no test item enters a prompt
+  (except the explicitly diagnostic ``oracle`` mode).
+- Candidate order is loaded exactly from --candidate-file and never reshuffled.
+- Test behaviors are mapped with the SAME text/compatibility rule used to build the Tree;
+  the mapping confidence filter follows the Tree metadata unless overridden.
+- Semantic fields of other users / cluster members never enter the prompt: a predicted
+  state contributes only its abstract HOW.
 
 Example
 -------
-python inference_tree_latest_behavior_gemma.py   --items data/CDs/items.json   --sequences data/CDs/user_sequences_10_5000.json   --negatives data/CDs/user_negatives_10_5000.json   --candidate-file data/CDs/user_sequences_candidates_seed42.json   --precomputed-behaviors precomputed/CDs/test_user_behaviors_gemma_dual_v2_300.jsonl   --tree-dir behavior_tree_out_dual_v2_k50   --output results/tree_latest_behavior_cd_300.jsonl   --model Qwen/Qwen2.5-7B-Instruct   --max-users 300   --top-next 1   --tree-max-query-order 0   --history-size 10   --llm-batch-size 8   --run-native   --run-latest-only   --seed 42
-
-
-Refactored entry point (formerly inference_bt4rec_ablation.py). Run: python -m bt4rec.cli.run --help
+python -m bt4rec.cli.run --dataset CDs --modes native,latest_what_only,latest_how_only,tree,tree_v2
 """
 from __future__ import annotations
 
@@ -92,7 +46,6 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-import numpy as np
 import torch
 from tqdm.auto import tqdm
 
@@ -119,7 +72,6 @@ from bt4rec.eval.metrics import (
     paired_bootstrap,
     target_rank,
 )
-from bt4rec.guidance.persistence import compute_order1_persistence
 from bt4rec.guidance.pmn import load_pmn_profiles, select_pmn_neighbours
 from bt4rec.guidance.sources import choose_random_how, how_only, load_oracle, read_train_how, tree_global_how
 from bt4rec.inference.audit import (
@@ -127,12 +79,12 @@ from bt4rec.inference.audit import (
     manifest_checkpoint,
     validate_tree_provenance,
 )
-from bt4rec.inference.constants import LATEST_HOW_MODES, RANDOM_SOURCE_MODES, RANK_PROMPT_VERSION, SCHEMA_VERSION, STAY_MODES, STAY_PROMPT_VERSIONS
+from bt4rec.inference.constants import (RANDOM_SOURCE_MODES, RANK_PROMPT_VERSION, REFERENCE_MODE, SCHEMA_VERSION,
+                                        TREE_MODES)
 from bt4rec.inference.inputs import resolve_inputs, resolve_source_files
 from bt4rec.llm.encoder import QwenEncoder
-from bt4rec.llm.ranker import LocalQwenRanker, build_ranker
+from bt4rec.llm.ranker import RANK_SYSTEM_PROMPT, LocalQwenRanker
 from bt4rec.ranking.modes import mode_prompt, requested_modes
-from bt4rec.ranking.score_format import to_score_prompt
 from bt4rec.tree.query import ReverseBehaviorTree, latest_accepted_state_suffix
 from bt4rec.tree.vocab import ClusterStateVocabulary
 
@@ -192,11 +144,11 @@ def comemtree_cost(a, rows, modes, users, test_cache):
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="CoMemTree/Qwen LIST ranking, standardized frozen train-only protocol. "
-                    "Minimal: --dataset ML (other presets: CDs, Video_Games)."
+        description="CoMemTree inference (Qwen list ranking, frozen protocol). "
+                    "Minimal: --dataset CDs (presets: configs/datasets/*.yaml)."
     )
     p.add_argument("--dataset", required=True,
-                   help="CDs | Video_Games | ML | Books | Software")
+                   help="CDs | Video_Games | ML | Books")
     p.add_argument("--tree", "--tree-dir", dest="tree_dir", default=None,
                    help="Optional Tree directory override. Default auto-resolved from --dataset, "
                         "e.g. trees/ML_1000_20, trees/CDs_1000_20, trees/VGs_1000_20.")
@@ -233,21 +185,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mapping-min-margin", type=float, default=None)
     p.add_argument("--respect-mapping-filter", action=argparse.BooleanOptionalAction, default=None,
                    help="Apply the similarity/margin confidence filter when mapping test behaviors to "
-                        "states. Default: follow the Tree (ON, unless it was built with "
-                        "--keep-ambiguous-assignments, i.e. the no-confidence-filter ablation).")
-    p.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct",
-                   help="ranking LLM. local: Qwen/Qwen2.5-7B-Instruct (default) or a Gemma-3 id, e.g. "
-                        "unsloth/gemma-3-4b-it-unsloth-bnb-4bit (auto-detected); openai: gpt-4o-mini")
-    p.add_argument("--ranker", choices=["local", "openai"], default="local",
-                   help="local = Unsloth (Qwen/Gemma); openai = OpenAI chat API (OPENAI_API_KEY from env)")
-    p.add_argument("--rank-format", choices=["list", "score"], default="list",
-                   help="list (default): C-label ranking list + list repair. score: i2Agent-style output "
-                        "({\"scores\": {C01: 0.92, ...}}) with i2Agent's system prompt, parser and repair "
-                        "(lenient labels, sort by score, ties/missing in frozen order). Evidence sections "
-                        "of the prompt are unchanged; works with --ranker local and openai.")
-    p.add_argument("--api-workers", type=int, default=8, help="parallel API requests (--ranker openai)")
-    p.add_argument("--api-base", default=None, help="optional OpenAI-compatible base URL")
-    p.add_argument("--api-cache", default=None, help="response cache jsonl; default <run_dir>/openai_cache.jsonl")
+                        "states. Default: follow the Tree (OFF unless it was built with --confidence-filter).")
+    p.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct", help="ranking LLM (Unsloth, Qwen chat template)")
     p.add_argument("--max-seq-length", type=int, default=8192)
     p.add_argument("--load-in-4bit", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--rank-max-new-tokens", type=int, default=1024)
@@ -262,10 +201,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--top-next", type=int, default=1)
     p.add_argument("--tree-max-query-order", type=int, default=0,
                    help="0=full Tree configured max_order, 1/2/...=order cap")
-    p.add_argument("--run-native", action=argparse.BooleanOptionalAction, default=True)
-    p.add_argument("--run-latest-only", action=argparse.BooleanOptionalAction, default=True)
-    p.add_argument("--run-recent3", action=argparse.BooleanOptionalAction, default=True,
-                   help="Additional baseline: last 3 OBSERVED semantic behaviors, without Tree prediction")
     p.add_argument("--strict-cache-history", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--start-user", type=int, default=0)
     p.add_argument("--max-users", type=int, default=1000,
@@ -283,13 +218,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--resume", action="store_true",
                    help="Continue results in explicit --run-dir (requires same frozen run configuration)")
     p.add_argument("--seed", type=int, default=42)
-    # Ablation-specific settings. Base prompt/Tree mapping/ranker are unchanged.
-    p.add_argument("--stay-prompt", choices=["v2", "v1"], default="v2",
-                   help="Section 4 wording for *_stay modes. v2 (default): latest WHAT + P(stay), "
-                        "short. v1: legacy wording from inference_bt4rec_ablation.py.")
-    p.add_argument("--modes", default="latest_only,latest_how,random_how,global_continuation,pmn,tree,oracle",
-                   help="Comma-separated modes. Extra: recent3,recent3_tree,tree_original,native."
-                        " All modes share identical frozen history/candidates/parser.")
+    p.add_argument("--modes", default="native,latest_what_only,latest_how_only,tree,tree_v2",
+                   help="Comma-separated conditions. Main: native, latest_what_only, latest_how_only, tree, "
+                        "tree_v2. Ablation: random_how_only, global_continuation, pmn (needs --pmn-summaries), "
+                        "oracle (needs --oracle-behaviors). All share history/candidates/parser.")
     p.add_argument("--train-behaviors", default=None,
                    help="TRAIN-only source behavior memory for random HOW; default precomputed/<dataset>/train_shared.jsonl")
     p.add_argument("--source-user-ids-file", default=None,
@@ -299,7 +231,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--require-user-disjoint-tree", action="store_true",
                    help="Fail if Tree metadata indicates any training/eval user overlap or lacks coverage metadata")
     p.add_argument("--pmn-summaries", default=None,
-                   help="Gemma-generated target/source preference profiles from prepare_pmn_summaries.py")
+                   help="Preference profiles from bt4rec.cli.prepare_pmn (pmn mode)")
     p.add_argument("--pmn-embedding-model", default="Qwen/Qwen3-Embedding-0.6B",
                    help="Fixed PMN profile encoder; independent of Tree states and centroids")
     p.add_argument("--oracle-behaviors", default=None,
@@ -312,8 +244,8 @@ def parse_args() -> argparse.Namespace:
 def main():
     a = resolve_inputs(parse_args())
     if a.respect_mapping_filter is None:
-        # Follow the Tree: a Tree built without the confidence filter
-        # (--keep-ambiguous-assignments) is also queried without it.
+        # Follow the Tree: test behaviors are mapped with the same confidence filter
+        # setting that was used for the training assignments.
         aq = (load_json(a.states_json).get('metadata', {}).get('cluster_quality', {})
               .get('assignment_quality', {}))
         a.respect_mapping_filter = not bool(aq.get('keep_ambiguous_assignments', False))
@@ -370,11 +302,9 @@ def main():
 
     stamp=datetime.now(ZoneInfo('Australia/Sydney')).strftime('%Y%m%d_%H%M%S')
     order_tag = 'fulltree' if a.tree_max_query_order==0 else f'order{a.tree_max_query_order}'
-    model_tag = '' if (a.ranker=='local' and a.model=='Qwen/Qwen2.5-7B-Instruct') else \
+    model_tag = '' if a.model=='Qwen/Qwen2.5-7B-Instruct' else \
         '_' + re.sub(r'[^A-Za-z0-9.]+','-',a.model.split('/')[-1]).strip('-')
-    if a.rank_format=='score':
-        model_tag += '_score'
-    run_dir=Path(a.run_dir) if a.run_dir else Path(a.output_root)/(f'{a.dataset}_{len(users)}_{a.history_size}_{order_tag}{model_tag}_ablation_{stamp}')
+    run_dir=Path(a.run_dir) if a.run_dir else Path(a.output_root)/(f'{a.dataset}_{len(users)}_{a.history_size}_{order_tag}{model_tag}_{stamp}')
     if a.resume and not a.run_dir:
         raise ValueError('--resume requires --run-dir')
     if run_dir.exists() and not a.resume:
@@ -387,7 +317,7 @@ def main():
             raise ValueError('Cannot resume: configuration/file hashes changed')
     else:
         dump_json(manifest,{'checkpoints':checkpoints,'config':vars(a),'validation':info,
-                            'created_at_sydney':stamp,'description':'controlled bt4rec behavior guidance ablation'})
+                            'created_at_sydney':stamp,'description':'CoMemTree controlled ranking conditions'})
     path=run_dir/'rankings.jsonl'
     done = processed_users_from_jsonl(path) if a.resume else set()
     pending=[uid for uid in users if uid not in done]
@@ -431,8 +361,7 @@ def main():
                                                 collapse_consecutive=tree.collapse_consecutive_states)
             tr=tree.query(suffix,top_next=a.top_next,max_query_order=a.tree_max_query_order)
             predicted=tr.get('predicted_next_states',[])
-            if not predicted and any(m in modes for m in ('tree','tree_how_only','tree_original','recent3_tree',
-                                                     'tree_stay','tree_original_stay','recent3_tree_stay')):
+            if not predicted and TREE_MODES & set(modes):
                 raise ValueError(f'{uid}: Tree query yielded no continuation')
             cand_ids,targets=get_candidates_for_user(uid,seq,{},frozen,a.seed)
             if len(targets)!=1:
@@ -441,16 +370,14 @@ def main():
             cmeta=[get_item_info(x,items) for x in cand_ids]
             hows={}
             metadata={}
-            if LATEST_HOW_MODES & set(modes):
-                # latest_how_only reuses this exact HOW without the latest WHAT.
+            if 'latest_how_only' in modes:
                 hows['latest_how']=how_only(test_cache[uid]['generated_behaviors'][-1])
             if need_random:
-                # random_only reuses this exact sample (same seed/uid) without latest WHAT.
                 hows['random_how'],metadata['random_how']=choose_random_how(train_how,uid,a.seed)
             if 'global_continuation' in modes:
                 hows['global_continuation']=global_how
                 metadata['global_continuation']=global_audit
-            if any(m in modes for m in ('tree','tree_how_only','recent3_tree','tree_stay','recent3_tree_stay')):
+            if TREE_MODES & set(modes):
                 hows['tree']=how_only(predicted[0])
                 metadata['tree']={'state_id':predicted[0]['state_id'],
                                   'probability':predicted[0].get('probability'),
@@ -461,40 +388,25 @@ def main():
             if 'oracle' in modes:
                 hows['oracle']=oracles[uid]
                 metadata['oracle']={'future_aware':True,'diagnostic_only':True}
-            stay = compute_order1_persistence(tree,mapped.get(uid,[])) if set(modes) & STAY_MODES else None
-            if stay is not None:
-                stay['prompt_version'] = STAY_PROMPT_VERSIONS[a.stay_prompt]
-            # HOW of the user's own latest observed window (shown in the v2 stay block).
-            latest_how = None
-            if set(modes) & STAY_MODES:
-                try:
-                    latest_how = how_only(test_cache[uid]['generated_behaviors'][-1])
-                except ValueError:
-                    latest_how = None
-            if stay is not None and a.stay_prompt == 'v2':
-                stay['latest_observed_how'] = latest_how
             rec={'user_id':uid,'history_items':hist,'candidate_items':cmeta,
                  'candidate_ids':cand_ids,'targets':targets,
                  'latest_behavior':latest,'recent3_behaviors':recent3,'hows':hows,
                  'guidance_metadata':metadata,'tree_result':tr,
                  'state_mappings':mapped.get(uid,[]),'tree_query_state_suffix':suffix,
-                 'predicted_transition':predicted, 'last_state_persistence':stay,
-                 'stay_prompt':a.stay_prompt, 'latest_how':latest_how}
+                 'predicted_transition':predicted}
             rec['prompts']={m:mode_prompt(m,rec) for m in modes}
-            if a.rank_format=='score':
-                rec['prompts']={m:to_score_prompt(pr,len(cmeta)) for m,pr in rec['prompts'].items()}
             prepared.append(rec)
         # All prompts generated BEFORE any ranker inference. Their modalities are inspectable.
         selected=next((x for x in prepared if x['user_id']==a.prompt_example_user),prepared[0])
         text=['Dataset: '+a.dataset,'User: '+selected['user_id'],
-              'System prompt: You are a recommendation ranking system. Return only the requested candidate-label ranking.']
+              'System prompt: '+RANK_SYSTEM_PROMPT]
         for mode,p in selected['prompts'].items():
             text.extend(['','='*18+f' {mode} '+'='*18,p])
         (run_dir/'prompt_example.txt').write_text('\n'.join(text)+'\n',encoding='utf8')
         dump_json(run_dir/'prompt_example.json',{'dataset':a.dataset,'user_id':selected['user_id'],
                'candidate_label_map':{f'C{i:02d}':x for i,x in enumerate(selected['candidate_ids'],1)},
                'latest_behavior':selected['latest_behavior'],
-               'guidance':selected['hows'],'last_state_persistence':selected['last_state_persistence'],
+               'guidance':selected['hows'],
                'prompts':selected['prompts']})
         if a.save_all_prompts:
             with (run_dir/'prompts_all.jsonl').open('w',encoding='utf8') as fo:
@@ -514,21 +426,14 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    if a.ranker=='openai':
-        ranker=build_ranker(a, cache_dir=run_dir)
-    else:  # local Qwen (default) or Gemma-3 (auto-detected from --model)
-        ranker=LocalQwenRanker(a.model,a.max_seq_length,a.load_in_4bit,
-                               a.rank_max_new_tokens,a.temperature,a.seed)
-    if a.rank_format!='list':
-        ranker.set_rank_format(a.rank_format)
-    # API: one chunk = several parallel requests (results are per-prompt, order preserved).
-    rank_bs = a.llm_batch_size if a.ranker=='local' else max(a.llm_batch_size, 4*a.api_workers)
+    ranker=LocalQwenRanker(a.model,a.max_seq_length,a.load_in_4bit,
+                           a.rank_max_new_tokens,a.temperature,a.seed)
     ranked_by_mode={}
     for mode in modes:
-        print(f'[RANK] {mode}: {len(prepared)} users; batch={rank_bs}; ranker={a.ranker}:{a.model}',flush=True)
+        print(f'[RANK] {mode}: {len(prepared)} users; batch={a.llm_batch_size}',flush=True)
         jobs=[{'prebuilt_prompt':rec['prompts'][mode],'candidate_items':rec['candidate_items']}
               for rec in prepared]
-        ranked_by_mode[mode]=ranker.rank_jobs(jobs,batch_size=rank_bs,
+        ranked_by_mode[mode]=ranker.rank_jobs(jobs,batch_size=a.llm_batch_size,
                                               call_type=mode,max_retries=0)
     for i,rec in enumerate(tqdm(prepared,desc='Save ablation rankings',unit='user')):
         ranks={}
@@ -544,8 +449,7 @@ def main():
              'recent3_observed_behaviors':rec['recent3_behaviors'],
              'guidance':rec['hows'],'guidance_audit':rec['guidance_metadata'],
              'tree_result':rec['tree_result'],'state_mappings':rec['state_mappings'],
-             'tree_query_state_suffix':rec['tree_query_state_suffix'],
-             'last_state_persistence':rec['last_state_persistence'],'rankings':ranks}
+             'tree_query_state_suffix':rec['tree_query_state_suffix'],'rankings':ranks}
         append_jsonl(path,row)
 
     rows=[r for r in read_jsonl(path) if r.get('schema_version')==SCHEMA_VERSION
@@ -558,56 +462,35 @@ def main():
     # Paired view: users whose ranking was parse-complete in EVERY mode, so all
     # modes are compared on the same subset (metrics_complete_only is per mode).
     metric_complete_paired=aggregate_complete_intersection(rows,modes)
-    significance=({mode:paired_bootstrap(rows,mode,'latest_only',seed=a.seed)
-                   for mode in modes if mode!='latest_only'} if 'latest_only' in modes else {})
+    significance=({mode:paired_bootstrap(rows,mode,REFERENCE_MODE,seed=a.seed)
+                   for mode in modes if mode!=REFERENCE_MODE} if REFERENCE_MODE in modes else {})
     parse_quality={}
     for mode in modes:
         recs=[r.get('rankings',{}).get(mode) for r in rows]
         good=[r for r in recs if isinstance(r,dict)]
         parse_quality[mode]={'rows':len(good),'parse_complete_count':sum(bool(r.get('parse_complete')) for r in good),
                              'parse_complete_rate':sum(bool(r.get('parse_complete')) for r in good)/len(good) if good else None}
-    deltas={mode:metric_gain(metric_all[mode],metric_all.get('latest_only'))
-            for mode in modes if mode!='latest_only'} if 'latest_only' in modes else {}
+    deltas={mode:metric_gain(metric_all[mode],metric_all.get(REFERENCE_MODE))
+            for mode in modes if mode!=REFERENCE_MODE} if REFERENCE_MODE in modes else {}
+    if 'tree_v2' in modes and 'tree' in modes:
+        deltas['tree_v2_minus_tree']=metric_gain(metric_all['tree_v2'],metric_all['tree'])
     if 'pmn' in modes and 'tree' in modes:
         deltas['tree_minus_pmn']=metric_gain(metric_all['tree'],metric_all['pmn'])
-    if set(modes) & STAY_MODES and tree.collapse_consecutive_states:
-        print('[WARN] Tree was built with --collapse-consecutive-states: P(stay) is not estimable; '
-              'stay modes only add the "Not estimable" block.',flush=True)
-    if 'tree_stay' in modes and 'tree' in modes:
-        deltas['tree_stay_minus_tree']=metric_gain(metric_all['tree_stay'],metric_all['tree'])
-    if 'tree_original_stay' in modes and 'tree_original' in modes:
-        deltas['tree_original_stay_minus_tree_original']=metric_gain(metric_all['tree_original_stay'],metric_all['tree_original'])
-    if 'recent3_tree_stay' in modes and 'recent3_tree' in modes:
-        deltas['recent3_tree_stay_minus_recent3_tree']=metric_gain(metric_all['recent3_tree_stay'],metric_all['recent3_tree'])
-    if 'recent3_tree' in modes and 'recent3' in modes:
-        deltas['recent3_tree_minus_recent3']=metric_gain(metric_all['recent3_tree'],metric_all['recent3'])
-    stay_rows=[r.get('last_state_persistence') for r in rows]
-    stay_values=[float(x['probability_next_same_behavior_state']) for x in stay_rows
-                 if isinstance(x,dict) and x.get('available')]
-    stay_audit=({'order':1,'prompt_version':STAY_PROMPT_VERSIONS[a.stay_prompt],
-                 'available_count':len(stay_values),
-                 'unavailable_count':len(rows)-len(stay_values),
-                 'mean_probability':float(np.mean(stay_values)) if stay_values else None,
-                 'median_probability':float(np.median(stay_values)) if stay_values else None,
-                 'unavailable_reasons':dict(Counter(x.get('reason') for x in stay_rows
-                     if isinstance(x,dict) and not x.get('available')))}
-                if set(modes) & STAY_MODES else None)
     cost=comemtree_cost(a,rows,modes,users,test_cache)
     dump_json(run_dir/'cost_summary.json',cost)
     summary={'schema_version':SCHEMA_VERSION,'rank_prompt_version':RANK_PROMPT_VERSION,
              'dataset':a.dataset,'modes':modes,'num_users':len(users),
              'metrics':metric_all,'metrics_complete_only':metric_complete,
              'metrics_complete_paired':metric_complete_paired,
-             'paired_bootstrap_vs_latest_only':significance,
+             'reference_mode':REFERENCE_MODE,
+             'paired_bootstrap_vs_reference':significance,
              'differences':deltas,'parse_quality':parse_quality,
              'tree_context_order_counts':dict(Counter(str(r.get('tree_result',{}).get('matched_order')) for r in rows)),
              'tree_root_fallback_count':sum(r.get('tree_result',{}).get('matched_order')==0 for r in rows),
              'ranking_llm':ranker.stats(), 'cost_by_mode':cost['by_mode'],
              'frozen_protocol':audit,'tree_provenance':prov,
-             'last_state_persistence_audit':stay_audit,
              'pmnc':pmn_audit,'run_dir':str(run_dir),'config':vars(a),
-             'warning':'ORACLE uses held-out test information; diagnostic only, not deployable. '
-                       'Tree_original prompt differs from common controlled template; report separately.'}
+             'warning':'ORACLE uses held-out test information; diagnostic only, not deployable.'}
     dump_json(run_dir/'summary.json',summary)
     print('[RESULTS]',json.dumps({'metrics':metric_all,'differences':deltas,
                                    'parse_quality':parse_quality},ensure_ascii=False,indent=2))

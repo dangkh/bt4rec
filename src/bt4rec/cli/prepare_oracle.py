@@ -6,7 +6,7 @@ candidate labels or target title in the ranking prompt.  The oracle must be
 restricted to diagnostic upper-bound analysis, NEVER deployed as a baseline.
 
 
-Refactored entry point (formerly prepare_target_user_oracle.py). Run: python -m bt4rec.cli.prepare_oracle --help
+Run: python -m bt4rec.cli.prepare_oracle --help
 """
 from __future__ import annotations
 

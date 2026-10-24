@@ -21,7 +21,7 @@ from bt4rec.tree.assign import CompatibilityIndex, nearest_compatible_state
 
 class ClusterStateVocabulary:
     """
-    Frozen cluster vocabulary produced by build_reverse_behavior_tree_dual.py.
+    Frozen behavior-state vocabulary produced by bt4rec.cli.build_tree.
     """
 
     def __init__(

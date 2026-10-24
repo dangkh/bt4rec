@@ -8,11 +8,11 @@ test users" number, so the selection bias is visible.
 
 Usage (one --run per query-order run directory, LABEL=PATH):
   python scripts/dev/crossfit_select.py \
-      --run o1=results/bt4rec_ablation/CDs/<run_order1> \
-      --run o2=results/bt4rec_ablation/CDs/<run_order2> \
-      --run full=results/bt4rec_ablation/CDs/<run_full> \
-      --modes tree,tree_original,recent3_tree,tree_stay,tree_original_stay,recent3_tree_stay \
-      --baseline latest_only --select-metric NDCG@5 --folds 2
+      --run o1=results/comemtree/CDs/<run_order1> \
+      --run o2=results/comemtree/CDs/<run_order2> \
+      --run full=results/comemtree/CDs/<run_full> \
+      --modes tree,tree_v2 \
+      --baseline latest_what_only --select-metric NDCG@5 --folds 2
 """
 from __future__ import annotations
 
@@ -67,7 +67,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", action="append", required=True, help="LABEL=run_dir_or_rankings.jsonl")
     ap.add_argument("--modes", required=True, help="Comma list of Tree-family modes to select among")
-    ap.add_argument("--baseline", default="latest_only")
+    ap.add_argument("--baseline", default="latest_what_only")
     ap.add_argument("--select-metric", default="NDCG@5")
     ap.add_argument("--folds", type=int, default=2)
     ap.add_argument("--seed", type=int, default=42)

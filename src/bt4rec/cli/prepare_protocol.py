@@ -21,7 +21,7 @@ python prepare_frozen_protocol.py --dataset CDs     --sizes 100,300,500,1000 --s
 python prepare_frozen_protocol.py --dataset CDs     --sizes 100,300,500,1000 --negative-fallback pooled --seed 42
 
 
-Refactored entry point (formerly prepare_data.py). Run: python -m bt4rec.cli.prepare_protocol --help
+Run: python -m bt4rec.cli.prepare_protocol --help
 """
 from __future__ import annotations
 

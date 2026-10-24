@@ -24,22 +24,23 @@ Only the TRAJECTORY view is used to create cluster embeddings / state identity.
 recommendation_behavior and semantic_focus are preserved only for auditing and
 later ranking evidence. They never enter KMeans.
 
-Pipeline
---------
+Pipeline (defaults)
+-------------------
 dual-view local memories
-    -> abstract trajectory text
-    -> hard bucket by mechanism (default)
-    -> KMeans within compatible buckets
-    -> confidence/margin filtering
-    -> ordered accepted state segments
-    -> collaborative variable-order reverse suffix tree
+    -> abstract trajectory text (mechanism / scope / direction / trajectory)
+    -> global KMeans over the trajectory embeddings
+    -> every memory assigned to its nearest centroid
+    -> ordered per-user state sequences
+    -> collaborative variable-order reverse suffix tree (per-user normalised counts)
 
-Ambiguous/rejected assignments BREAK a temporal segment rather than being
-silently removed and bridging the states on either side. This avoids creating
-false transitions across an uncertain memory.
+Optional (ablation) settings
+----------------------------
+--cluster-mode constrained   hard bucket by --constraint-level (e.g. mechanism) before KMeans
+--confidence-filter          reject low similarity / margin assignments; a rejected memory
+                             BREAKS the user's state sequence instead of bridging across it
+--count-mode occurrence      raw transition counts instead of per-user normalisation
 
-
-Refactored entry point (formerly build_reverse_behavior_tree.py). Run: python -m bt4rec.cli.build_tree --help
+Run: python -m bt4rec.cli.build_tree --help
 """
 from __future__ import annotations
 
@@ -69,11 +70,19 @@ from bt4rec.tree.embeddings import create_embeddings
 from bt4rec.tree.memories import DUAL_SCHEMA_NAME, dual_schema_stats, load_memories, read_user_id_set
 
 
+def _constraint_fields(args: argparse.Namespace) -> List[str]:
+    """Fields that hard-bucket KMeans (empty for the default global KMeans)."""
+    if args.cluster_mode != "constrained":
+        return []
+    return {"mechanism": ["mechanism"], "mechanism_scope": ["mechanism", "scope"]}.get(
+        args.constraint_level, ["mechanism", "scope", "direction"])
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
-            "Dual-view behavior cluster tree: trajectory view -> Qwen -> "
-            "constrained KMeans -> reverse behavior tree"
+            "Dual-view behavior Tree: trajectory view -> Qwen3 embedding -> "
+            "KMeans states -> reverse behavior suffix Tree"
         )
     )
 
@@ -143,50 +152,44 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=50,
         help=(
-            "Requested TOTAL number of clusters. With the default mechanism-level "
-            "constraint, effective K remains equal to requested K whenever feasible."
+            "Requested TOTAL number of clusters (with --cluster-mode constrained they are "
+            "allocated across the buckets)."
         ),
     )
     p.add_argument(
         "--cluster-mode",
         choices=["constrained", "global"],
-        default="constrained",
+        default="global",
         help=(
-            "constrained = hard bucket by --constraint-level before KMeans; "
-            "global = old unconstrained ablation."
+            "global (default) = one KMeans over all memories; constrained = hard bucket "
+            "by --constraint-level before KMeans (mechanism-constraint ablation)."
         ),
     )
     p.add_argument(
         "--constraint-level",
         choices=["mechanism", "mechanism_scope", "full"],
         default="mechanism",
-        help=(
-            "Hard constraint for constrained KMeans. Default mechanism is recommended; "
-            "scope/direction remain in the embedding and can split clusters naturally."
-        ),
+        help="Hard constraint used only with --cluster-mode constrained.",
     )
     p.add_argument(
         "--min-cluster-similarity",
         type=float,
         default=0.55,
-        help="Reject a training assignment below this cosine similarity.",
+        help="With --confidence-filter: reject an assignment below this cosine similarity.",
     )
     p.add_argument(
         "--min-cluster-margin",
         type=float,
         default=0.02,
-        help=(
-            "Reject a training assignment when top1-top2 cosine margin among "
-            "compatible clusters is below this value."
-        ),
+        help="With --confidence-filter: reject an assignment whose top1-top2 cosine margin is below this value.",
     )
     p.add_argument(
-        "--keep-ambiguous-assignments", "--no-confidence-filter",
-        dest="keep_ambiguous_assignments",
+        "--confidence-filter",
         action="store_true",
         help=(
-            "Diagnostic override: keep low-confidence assignments in tree "
-            "sequences. Default is to skip them."
+            "Reject low-confidence assignments (--min-cluster-similarity / "
+            "--min-cluster-margin); they break the user's state sequence. Default OFF: "
+            "every memory keeps its nearest state."
         ),
     )
     p.add_argument(
@@ -271,7 +274,10 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--seed", type=int, default=42)
 
-    return p.parse_args()
+    args = p.parse_args()
+    # Stored in the Tree metadata; inference applies the same mapping-filter setting.
+    args.keep_ambiguous_assignments = not args.confidence_filter
+    return args
 
 
 def main() -> None:
@@ -517,11 +523,7 @@ def main() -> None:
             "effective_num_clusters": cluster_info["effective_num_clusters"],
             "cluster_mode": args.cluster_mode,
             "constraint_level": args.constraint_level,
-            "constraint_fields": (
-                ["mechanism"] if args.constraint_level == "mechanism" else
-                ["mechanism", "scope"] if args.constraint_level == "mechanism_scope" else
-                ["mechanism", "scope", "direction"]
-            ),
+            "constraint_fields": _constraint_fields(args),
             "input_behavior_schema": schema_stats,
             "semantic_fields_used_for_clustering": False,
             "cluster_info": cluster_info,
@@ -535,7 +537,7 @@ def main() -> None:
                 else None
             ),
             "state_representation": (
-                "Behavior-constrained KMeans (configurable hard constraint) over structured behavior embeddings" if args.cluster_mode == "constrained" else "Global KMeans over Gemma behavior-text embeddings"
+                "Behavior-constrained KMeans (configurable hard constraint) over structured behavior embeddings" if args.cluster_mode == "constrained" else "Global KMeans over structured behavior embeddings"
             ),
             "cluster_quality": quality,
             "taxonomy_version": TAXONOMY_VERSION,
@@ -777,11 +779,7 @@ def main() -> None:
                 f"{args.cluster_text_field} embeddings"
             ),
             "constraint_level": args.constraint_level,
-            "constraint_fields": (
-                ["mechanism"] if args.constraint_level == "mechanism" else
-                ["mechanism", "scope"] if args.constraint_level == "mechanism_scope" else
-                ["mechanism", "scope", "direction"]
-            ),
+            "constraint_fields": _constraint_fields(args),
             "assignment_filter": {
                 "min_similarity": args.min_cluster_similarity,
                 "min_margin": args.min_cluster_margin,
@@ -872,11 +870,7 @@ def main() -> None:
         "effective_num_clusters": cluster_info["effective_num_clusters"],
         "cluster_mode": args.cluster_mode,
         "constraint_level": args.constraint_level,
-            "constraint_fields": (
-                ["mechanism"] if args.constraint_level == "mechanism" else
-                ["mechanism", "scope"] if args.constraint_level == "mechanism_scope" else
-                ["mechanism", "scope", "direction"]
-            ),
+            "constraint_fields": _constraint_fields(args),
         "cluster_info": cluster_info,
         "cluster_text_field": (
             args.cluster_text_field
